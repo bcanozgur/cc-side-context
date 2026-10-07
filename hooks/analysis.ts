@@ -1,6 +1,6 @@
 import type { SessionMessage, ToolUseSummary } from 'claude-code'
 
-import type { Eater } from '../types'
+import type { Eater, Guard } from '../types'
 
 // What the pane reads out of the transcript: no API calls, so every figure
 // here is an estimate from text length
@@ -25,6 +25,49 @@ const clip = (s: string, n: number) => {
   return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat
 }
 
+// Shell words, quotes kept together, and the operators between commands
+const WORDS = /'[^']*'|"(?:\\.|[^"\\])*"|&&|\|\||[;|&]|[^\s;|&'"]+/g
+const OPERATOR = /^(&&|\|\||[;|&])$/
+// Commands that only set the stage for the one doing the work
+const PRELUDE = new Set(['cd', 'pushd', 'popd', 'export', 'source', '.', 'set', 'true'])
+const WRAPPERS = new Set(['sudo', 'rtk', 'time', 'env', 'nohup', 'command', 'exec', 'xargs'])
+// Commands whose first argument says what they do: git status, npm test
+const SUBCOMMANDS = new Set(['git', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'bunx', 'cargo', 'go', 'docker', 'kubectl', 'gh', 'claude', 'make', 'pip', 'pip3', 'brew', 'uv', 'deno'])
+const unquote = (w: string) => w.replace(/^(['"])([\s\S]*)\1$/, '$2')
+const isFlag = (w: string) => w.startsWith('-')
+const isRedirect = (w: string) => /^\d*[<>]/.test(w)
+const isPath = (w: string) => /[/.]/.test(w) && !/[*?|()\\\s]/.test(w) && !isFlag(w)
+
+// What a shell command does, in a few words: the cd and env in front dropped,
+// a path made short, a heredoc called a script.
+// `cd /tmp/x && grep -n "a\|b" hooks/register.tsx` -> grep hooks/register.tsx
+export const commandOf = (command: string, cwd = ''): string => {
+  const words = command.split('\n')[0]?.match(WORDS) ?? []
+  const segments: string[][] = [[]]
+  for (const w of words) {
+    if (OPERATOR.test(w)) segments.push([])
+    else segments.at(-1)?.push(w)
+  }
+  const bare = segments
+    .map(seg => {
+      let i = 0
+      while (i < seg.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(seg[i] ?? '') || WRAPPERS.has(seg[i] ?? ''))) i++
+      return seg.slice(i)
+    })
+    .filter(seg => seg.length > 0)
+  const seg = bare.find(s => !PRELUDE.has(s[0] ?? '')) ?? bare[0]
+  if (!seg) return clip(command, 40)
+  const name = (seg[0] ?? '').split('/').pop() ?? ''
+  const rest = seg.slice(1)
+  if (rest.some(w => w.startsWith('<<')) || (/^(python|node|ruby|perl|bash|sh|zsh)/.test(name) && rest.includes('-c'))) return `${name} script`
+  const args = rest.filter(w => !isFlag(w) && !isRedirect(w)).map(unquote)
+  const path = args.find(isPath)
+  const shown = path ? short(path, cwd) : ''
+  if (SUBCOMMANDS.has(name) && args[0] && args[0] !== path) return clip(`${name} ${args[0]}${shown ? ` ${shown}` : ''}`, 40)
+  if (shown) return clip(`${name} ${shown}`, 40)
+  return clip(args[0] ? `${name} ${args[0]}` : name, 40)
+}
+
 // mcp__github__get_issue -> github › get_issue
 export const toolLabel = (tool: string): string => {
   const m = /^mcp__(.+?)__(.+)$/.exec(tool)
@@ -43,7 +86,7 @@ export const targetOf = (use: Pick<ToolUseSummary, 'tool' | 'input'>, cwd = ''):
     case 'NotebookEdit':
       return short(path, cwd)
     case 'Bash':
-      return clip(str(i.command), 40)
+      return commandOf(str(i.command), cwd)
     case 'Grep':
     case 'Glob':
       return clip(str(i.pattern), 30) + (path ? ` in ${short(path, cwd)}` : '')
@@ -83,6 +126,10 @@ export const tipOf = (tool: string): string => {
   }
 }
 
+// What a guard matches on: the file a Read took whole, the exact command a Bash ran
+const rawOf = (use: Pick<ToolUseSummary, 'tool' | 'input'>): string =>
+  use.tool === 'Read' ? str(use.input.file_path) : use.tool === 'Bash' ? str(use.input.command).replace(/\s+/g, ' ').trim() : ''
+
 // Calls under this size are not worth a row
 const EATER_FLOOR = 500
 
@@ -101,7 +148,10 @@ export const eatersOf = (messages: readonly SessionMessage[], limit = 5, cwd = '
       if (seen) {
         seen.tokens += tokens
         seen.count += 1
-      } else byKey.set(key, { tool: use.tool, target, tokens, count: 1 })
+      } else {
+        const raw = rawOf(use)
+        byKey.set(key, { tool: use.tool, target, tokens, count: 1, ...(raw ? { raw } : {}) })
+      }
     }
   }
   return [...byKey.values()]
@@ -109,6 +159,36 @@ export const eatersOf = (messages: readonly SessionMessage[], limit = 5, cwd = '
     .sort((a, b) => b.tokens - a.tokens)
     .slice(0, limit)
 }
+
+// All the tool output still in the conversation
+export const toolTokens = (messages: readonly SessionMessage[]): number =>
+  uses(messages).reduce((sum, use) => sum + (use.text ? estimate(use.text) : 0), 0)
+
+// A guard asks the model to narrow a call that ate a lot last time: a whole
+// file read becomes a range, a noisy command gets its output trimmed. Only
+// these two have a smaller form to ask for.
+export const guardOf = (eater: Eater): Guard | undefined => {
+  const tokens = Math.round(eater.tokens / eater.count)
+  if ((eater.tool !== 'Read' && eater.tool !== 'Bash') || !eater.raw) return undefined
+  return { tool: eater.tool, key: eater.raw, label: eater.target, tokens }
+}
+
+// Output already narrowed: piped through a filter, or sent to a file
+const NARROWED = /\|\s*(head|tail|grep|rg|wc|jq|awk|sed|cut|sort|uniq|less)\b|(?:^|[^\d&])>\s*[^&\s]/
+
+// Which guard, if any, a call runs into
+export const guardHit = (guards: readonly Guard[], call: { tool: string; input: Record<string, unknown> }): Guard | undefined => {
+  const i = call.input
+  if (call.tool === 'Read' && (i.offset !== undefined || i.limit !== undefined || i.pages !== undefined)) return undefined
+  if (call.tool === 'Bash' && NARROWED.test(str(i.command))) return undefined
+  const raw = rawOf(call)
+  return raw ? guards.find(g => g.tool === call.tool && g.key === raw) : undefined
+}
+
+export const guardMessage = (g: Guard): string =>
+  g.tool === 'Read'
+    ? `cc-side-context guard: reading all of ${g.label} put ~${fmt(g.tokens)} tokens into context last time. Read only the part you need (offset/limit), or Grep for it first. If you really need the whole file, make the same call again.`
+    : `cc-side-context guard: \`${g.label}\` printed ~${fmt(g.tokens)} tokens last time. Narrow its output (| tail -n 40, | grep …, or > a file read in parts). If you need all of it, make the same call again.`
 
 const EDITS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
 const uses = (messages: readonly SessionMessage[]) => messages.flatMap(m => (m.role === 'assistant' ? m.toolUses : []))

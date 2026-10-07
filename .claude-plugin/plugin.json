@@ -1,6 +1,6 @@
 {
   "name": "cc-side-context",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "See what is eating your Claude Code context, live in a side pane, and fix it in one key: top context eaters, prompt-cache countdown, compaction that keeps your decisions, handoff notes",
   "author": { "name": "bcanozgur", "url": "https://github.com/bcanozgur" },
   "homepage": "https://github.com/bcanozgur/cc-side-context",

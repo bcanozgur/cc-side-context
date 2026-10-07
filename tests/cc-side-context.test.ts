@@ -2,6 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On, SessionMessage, SessionUsage, UiPane } from 'claude-code'
 import type { TestBody } from 'claude-code/testing'
 
+import { commandOf } from '../hooks/analysis'
+
 const PANE = 'side-context'
 const START = { cwd: '/tmp', surface: 'terminal', isInteractive: true } as const
 
@@ -364,4 +366,60 @@ test('a resumed or cleared conversation is measured again at once', async ($, on
   const drawn = JSON.stringify(await pane.drawn())
   expect(drawn).not.toContain('Measuring')
   expect(drawn).toContain('84.0k')
+})
+
+test('a Bash row says what the command did, not how it was spelled', async () => {
+  expect(commandOf('cd /private/tmp/x && grep -n "drawn\\|mount(" /repo/hooks/register.tsx', '/repo')).toBe('grep hooks/register.tsx')
+  expect(commandOf("python3 - <<'EOF'\nprint(1)\nEOF")).toBe('python3 script')
+  expect(commandOf('sed -n 1,62p hooks/analysis.ts; sed -n 70,90p hooks/analysis.ts')).toBe('sed hooks/analysis.ts')
+  expect(commandOf('FOO=1 rtk git status')).toBe('git status')
+  expect(commandOf('npm test 2>&1 | tail -20')).toBe('npm test')
+  expect(commandOf('ls')).toBe('ls')
+})
+
+test('x guards the biggest eater: the next whole read is sent back once', async ($, on) => {
+  engine(on)
+  mock.store(on)
+  const read: string[] = []
+  on('tool.call', (_$, e) => {
+    read.push(e.tool)
+    return { result: { text: 'ok' } } as never
+  })
+  await $.session.start(START)
+  await $.command.run(run('on'))
+
+  const pane = await mount($)
+  await pane.press({ key: 'guard' })
+  expect(JSON.stringify(await pane.drawn())).toContain('⊘')
+
+  const first = await $.tool.call({ tool: 'Read', file_path: '/repo/src/big.ts' } as never)
+  expect(JSON.stringify(first)).toContain('offset/limit')
+  expect(read.length).toBe(0)
+  // a range goes through, and so does the same whole read asked again
+  await $.tool.call({ tool: 'Read', file_path: '/repo/src/big.ts', offset: 1, limit: 50 } as never)
+  await $.tool.call({ tool: 'Read', file_path: '/repo/src/big.ts' } as never)
+  expect(read.length).toBe(2)
+
+  expect((await $.command.run(run('guards'))).text).toContain('Read src/big.ts')
+  await $.command.run(run('guards clear'))
+  expect((await $.command.run(run('guards'))).text).toContain('No guards')
+})
+
+test('/side-context stats sums up the session and copies it', async ($, on) => {
+  engine(on)
+  const copied: string[] = []
+  on('ui.copy', (_$, e) => {
+    copied.push(e.text)
+    return { value: { isCopied: true } }
+  })
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  await $.turn.complete(turn)
+
+  const { text } = await $.command.run(run('stats'))
+  expect(text).toContain('84.0k / 200.0k now')
+  expect(text).toContain('Turns        1')
+  expect(text).toContain('Read src/big.ts ×2')
+  expect(text).toContain('the top 2 took 100%')
+  expect(copied[0]).toContain('Session stats')
 })

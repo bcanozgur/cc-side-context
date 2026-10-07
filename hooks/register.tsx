@@ -1,8 +1,23 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, PluginOptions, Register, SessionContextUsage, SessionUsage } from 'claude-code'
 
-import type { Item, Legend, Row, Snapshot, Square } from '../types'
-import { PRESERVE_MARK, eatersOf, fmt, handoffOf, limitName, preserveOf, sparkline, stamp, tipOf, toolLabel } from './analysis'
+import type { Guard, Item, Legend, Row, Snapshot, Square } from '../types'
+import {
+  PRESERVE_MARK,
+  eatersOf,
+  fmt,
+  guardHit,
+  guardMessage,
+  guardOf,
+  handoffOf,
+  limitName,
+  preserveOf,
+  sparkline,
+  stamp,
+  tipOf,
+  toolLabel,
+  toolTokens,
+} from './analysis'
 
 export { fmt }
 
@@ -29,6 +44,8 @@ const lastReply = atom({ plugin: 'cc-side-context', key: 'lastReply' } as const,
 const tick = atom({ plugin: 'cc-side-context', key: 'tick' } as const, 0)
 const warned = atom({ plugin: 'cc-side-context', key: 'warned' } as const, { cold: false, quality: false })
 const compacting = atom({ plugin: 'cc-side-context', key: 'compacting' } as const, false)
+const guards = atom({ plugin: 'cc-side-context', key: 'guards' } as const, [])
+const stats = atom({ plugin: 'cc-side-context', key: 'stats' } as const, { turns: 0, peak: 0, compactions: 0, colds: 0 })
 
 // What each /context row is called, the size past which it is unusually
 // large, and what to do about it. Matched on the row's name with "(deferred)" stripped.
@@ -133,6 +150,7 @@ const refresh = async ($: EngineInterface, detail: Snapshot['detail']) => {
   const usage = await $.session.usage({ breakdown: detail })
   const next = toSnapshot(usage.context, detail, await $.clock.now(), usage)
   await update($, snapshot, () => next)
+  await update($, stats, s => ({ ...s, peak: Math.max(s.peak, next.tokens) }))
   // The trend starts from the first reading, not from the first turn after it
   if (next.tokens > 0) await update($, history, h => (h.length === 0 ? [next.tokens] : h))
 }
@@ -170,6 +188,77 @@ const ttlOf = (options: PluginOptions, snap: Snapshot | null): number => {
   return snap && snap.limits.length > 0 ? 60 * 60_000 : 5 * 60_000
 }
 
+// Guards last across sessions, one list a project
+const guardKey = async ($: EngineInterface) => `guards:${await $.session.cwd().catch(() => '')}`
+
+const loadGuards = async ($: EngineInterface) => {
+  const stored = await $.store.get(await guardKey($))
+  await update($, guards, () => (Array.isArray(stored) ? (stored as Guard[]) : []))
+}
+
+const saveGuards = async ($: EngineInterface, fn: (gs: Guard[]) => Guard[]) => {
+  await update($, guards, fn)
+  const gs = await read($, guards)
+  const key = await guardKey($)
+  await (gs.length > 0 ? $.store.set(key, gs) : $.store.delete(key))
+}
+
+// The biggest eater that can be guarded and is not yet
+const nextGuard = (eaten: readonly Parameters<typeof guardOf>[0][], gs: readonly Guard[]): Guard | undefined =>
+  eaten.map(guardOf).find(g => g !== undefined && !gs.some(x => x.tool === g.tool && x.key === g.key))
+
+const guardPressed = async ($: EngineInterface) => {
+  const g = nextGuard(await read($, eaters), await read($, guards))
+  if (!g) return
+  await saveGuards($, gs => [...gs, g])
+  $.ui.toast(
+    g.tool === 'Read'
+      ? `Guarded: a whole read of ${g.label} now asks for a range first (this project)`
+      : `Guarded: \`${g.label}\` now asks for its output trimmed first (this project)`,
+    { timeoutMs: 8_000 },
+  )
+}
+
+// A denied call made again unchanged goes through: the model asked twice
+let lastDenied: string | null = null
+
+const guardCall = async ($: EngineInterface, call: { tool: string; input: Record<string, unknown> }) => {
+  const hit = guardHit(await read($, guards), call)
+  if (!hit) return undefined
+  const id = `${hit.tool}\u0000${hit.key}`
+  if (lastDenied === id) {
+    lastDenied = null
+    return undefined
+  }
+  lastDenied = id
+  return guardMessage(hit)
+}
+
+// A report of the session short enough to paste anywhere
+const statsOf = async ($: EngineInterface): Promise<string> => {
+  const messages = await $.session.messages()
+  const cwd = await $.session.cwd().catch(() => '')
+  const snap = await read($, snapshot)
+  const s = await read($, stats)
+  const gs = await read($, guards)
+  const output = toolTokens(messages)
+  const top = eatersOf(messages, 3, cwd)
+  const share = output > 0 ? Math.round((top.reduce((sum, t) => sum + t.tokens, 0) / output) * 100) : 0
+  const width = Math.max(0, ...top.map(t => `${toolLabel(t.tool)} ${t.target}${t.count > 1 ? ` ×${t.count}` : ''}`.length))
+  return [
+    'Session stats',
+    ...(snap ? [`Context      ${fmt(snap.tokens)} / ${fmt(snap.window)} now · peak ${fmt(Math.max(s.peak, snap.tokens))}`] : []),
+    `Turns        ${s.turns} · compactions ${s.compactions} · cache went cold ${s.colds}×${snap?.cost !== undefined && snap.cost >= 0.01 ? ` · $${snap.cost.toFixed(2)}` : ''}`,
+    `Tool output  ~${fmt(output)} in context${top.length > 0 ? ` · the top ${top.length} took ${share}%` : ''}`,
+    ...top.map(t => {
+      const label = `${toolLabel(t.tool)} ${t.target}${t.count > 1 ? ` ×${t.count}` : ''}`
+      return `  ${label.padEnd(width)}  ~${fmt(t.tokens)}`
+    }),
+    ...(gs.length > 0 ? [`Guards       ${gs.length} on in this project`] : []),
+    'github.com/bcanozgur/cc-side-context',
+  ].join('\n')
+}
+
 const reasonOf = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
 // Compaction with the keep-list. The plugin's own call does not pass through
@@ -183,6 +272,7 @@ const compact = async ($: EngineInterface) => {
     if (result.skip !== undefined) $.ui.toast(`Not compacted: ${result.skip}`)
     else {
       const { tokensBefore: before, tokensAfter: after } = result
+      await update($, stats, s => ({ ...s, compactions: s.compactions + 1 }))
       $.ui.toast(before !== undefined && after !== undefined ? `Compacted ${fmt(before)} → ${fmt(after)}; decisions and changed files kept` : 'Compacted')
     }
   } catch (err) {
@@ -217,6 +307,7 @@ const restart = async ($: EngineInterface) => {
   await update($, last, () => null)
   await update($, delta, () => 0)
   await update($, warned, () => ({ cold: false, quality: false }))
+  await update($, stats, () => ({ turns: 0, peak: 0, compactions: 0, colds: 0 }))
   await update($, snapshot, () => null)
 }
 
@@ -234,6 +325,7 @@ const onTick = async ($: EngineInterface, options: PluginOptions) => {
   if (at === null || snap.tokens < COLD_FLOOR) return
   if (now - at < ttlOf(options, snap) || (await read($, warned)).cold) return
   await update($, warned, w => ({ ...w, cold: true }))
+  await update($, stats, s => ({ ...s, colds: s.colds + 1 }))
   $.ui.toast(`Prompt cache expired: your next message re-sends ${fmt(snap.tokens)} tokens uncached. A handoff and /clear is cheaper.`, {
     timeoutMs: 10_000,
   })
@@ -260,9 +352,10 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'side-context',
-      description: 'Live context pane: toggle it, compact with a keep-list, or write a handoff',
-      argumentHint: '[on|off|full|compact|handoff]',
+      description: 'Live context pane: toggle it, compact with a keep-list, write a handoff, or share session stats',
+      argumentHint: '[on|off|full|compact|handoff|stats|guards [clear]]',
     })
+    await loadGuards($).catch(() => undefined)
     void $.ui.open({ id: PANE, title: TITLE })
     remeasure($)
     $.clock.every(30_000, () => void onTick($, options).catch(() => undefined))
@@ -289,6 +382,25 @@ export const register: Register = (on, options) => {
         return { text: await handoff($) }
       } catch (err) {
         return { text: `Could not write the handoff: ${reasonOf(err)}` }
+      }
+    }
+
+    if (arg === 'stats') {
+      const text = await statsOf($)
+      await $.ui.copy({ text }).catch(() => undefined)
+      return { text: `${text}\n\n(copied)` }
+    }
+    if (arg === 'guards clear') {
+      await saveGuards($, () => [])
+      return { text: 'Guards cleared for this project.' }
+    }
+    if (arg === 'guards') {
+      const gs = await read($, guards)
+      return {
+        text:
+          gs.length === 0
+            ? 'No guards in this project. Press x in the pane to guard the biggest context eater.'
+            : ['Guards in this project:', ...gs.map(g => `- ${g.tool} ${g.label} (~${fmt(g.tokens)})`), '', '/side-context guards clear removes them.'].join('\n'),
       }
     }
 
@@ -345,6 +457,7 @@ export const register: Register = (on, options) => {
       await update($, lastReply, () => at)
       await update($, tick, () => at)
       await update($, warned, w => ({ ...w, cold: false }))
+      await update($, stats, s => ({ ...s, turns: s.turns + 1 }))
       if (await isOpen($)) void scan($).catch(() => undefined)
     }
     return next(e)
@@ -356,9 +469,25 @@ export const register: Register = (on, options) => {
     const isOurs = (e.instructions ?? '').includes(PRESERVE_MARK)
     const instructions = smartCompact && !isOurs && e.messages.length > 0 ? [e.instructions, preserveOf(e.messages)].filter(Boolean).join('\n\n') : e.instructions
     const result = await next({ ...e, instructions })
-    if (e.trigger !== 'precompute' && !e.agentId && result.skip === undefined) remeasure($)
+    // The pane's own compaction counts itself once it has the figures
+    if (e.trigger !== 'precompute' && !e.agentId && result.skip === undefined) {
+      if (!isOurs) await update($, stats, s => ({ ...s, compactions: s.compactions + 1 }))
+      remeasure($)
+    }
     return result
     // A failure here must never stop the compaction itself
+  }).catch(($, e, next) => next(e))
+
+  // A guarded call is sent back once with how to make it smaller; a guard
+  // that fails lets the call through
+  on('tool.call', { tool: 'Read' }, async ($, e, next) => {
+    const deny = await guardCall($, { tool: 'Read', input: e as unknown as Record<string, unknown> })
+    return deny ? { deny } : next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const deny = await guardCall($, { tool: 'Bash', input: e as unknown as Record<string, unknown> })
+    return deny ? { deny } : next(e)
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -370,6 +499,7 @@ export const register: Register = (on, options) => {
     const isCompacting = await read($, compacting)
     const trend = await read($, history)
     const eaten = await read($, eaters)
+    const guarded = await read($, guards)
     const replied = await read($, lastReply)
     const now = Math.max(await read($, tick), await $.clock.now())
     const width = Math.max(24, Math.min(MAX_WIDTH, e.props.bodyColumns))
@@ -524,6 +654,7 @@ export const register: Register = (on, options) => {
     }
 
     const inUse = inWindow.filter(r => r.kind === 'used')
+    const canGuard = !isStorage && nextGuard(eaten, guarded) !== undefined
     const time = new Date(snap.at).toTimeString().slice(0, 5)
     const footer = isExact ? `Exact count · ${time}` : flagged.length > 0 ? `Estimate · ? may be large, r to check · ${time}` : `Estimate · ${time}`
 
@@ -586,7 +717,17 @@ export const register: Register = (on, options) => {
         {!isStorage && eaten.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
             <Text bold>Top context eaters</Text>
-            {eaten.map(t => line({ label: `${toolLabel(t.tool)} ${t.target}${t.count > 1 ? ` ×${t.count}` : ''}`, value: `~${fmt(t.tokens)}`, dim: true }))}
+            {eaten.map(t => {
+              const g = guardOf(t)
+              const isGuarded = g !== undefined && guarded.some(x => x.tool === g.tool && x.key === g.key)
+              return line({
+                mark: isGuarded ? '⊘ ' : '  ',
+                markColor: 'success',
+                label: `${toolLabel(t.tool)} ${t.target}${t.count > 1 ? ` ×${t.count}` : ''}`,
+                value: `~${fmt(t.tokens)}`,
+                dim: true,
+              })
+            })}
             {eaten[0] && advice(tipOf(eaten[0].tool))}
           </Box>
         )}
@@ -604,6 +745,7 @@ export const register: Register = (on, options) => {
         <Box marginTop={1} width={width} gap={1} flexWrap="wrap">
           <Button key="compact" hotkey="c" label={isCompacting ? 'compacting…' : 'compact'} onPress={() => void compact($)} />
           <Button key="handoff" hotkey="w" label="handoff" onPress={() => void handoffPressed($)} />
+          {canGuard && <Button key="guard" hotkey="x" label="guard" onPress={() => void guardPressed($).catch(() => undefined)} />}
           <Button key="details" hotkey="e" label={isExpanded ? 'less' : 'more'} onPress={() => void update($, expanded, v => !v)} />
           {/* The finer tools wait behind "more", so the everyday row stays short */}
           {(isExpanded || isStorage) && (

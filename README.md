@@ -29,15 +29,16 @@ cache 59m · 5h 49% · 7d 68% · $1.24
 Top context eaters
   Read package-lock.json ×3                   ~61.2k
   github › get_issue                          ~11.4k
+⊘ Bash npm test                               ~8.3k
   ↳ Read a range (offset/limit), not the whole file
 
-[ compact ] [ handoff ] [ more ]
+[ compact ] [ handoff ] [ guard ] [ more ]
 Estimate · 23:39
 ```
 
 | | |
 | --- | --- |
-| **Top context eaters** | The tool results still in your conversation, biggest first. Repeated reads of the same target are merged into one row. The biggest one comes with a tip on how to keep it smaller next time. |
+| **Top context eaters** | The tool results still in your conversation, biggest first. Repeated reads of the same target are merged into one row, and shell commands are shown by what they did (`grep hooks/register.tsx`, not the `cd … &&` in front). The biggest one comes with a tip on how to keep it smaller next time. |
 | **Per-category breakdown** | System prompt, tools, MCP, memory files, skills and conversation, live after every turn. Free space and the compact reserve are the pale end of the bar. A row that is larger than usual is flagged, with a one-line fix under it. |
 | **Room left** | How far it is to the quality limit (or to auto-compact), with a trend of the context after each turn. A drop is a compaction. |
 | **Prompt cache** | `cache 58m` counts down from the last reply. When the cache goes cold you get one warning, before your next message pays to write the whole conversation into it again. |
@@ -51,6 +52,8 @@ Estimate · 23:39
 | --- | --- | --- |
 | `c` | `/side-context compact` | **Compaction with a keep-list.** Tells the summary to keep your goal and rules word for word, every file changed, decisions and rejected approaches, open tasks and the next step. The same keep-list is also added to auto-compaction and to your own `/compact`. The pane shows `◌ Compacting` while the summary is written. |
 | `w` | `/side-context handoff` | **Handoff note.** Writes `.claude/side-context/handoff.md` (goal, recent requests, open todos, files changed and read, where it stopped) from the transcript, at no token cost, and copies the line to start a fresh session with. |
+| `x` | `/side-context guards` | **Don't let it happen again.** Guards the biggest eater in this project: the next time the model reads that whole file, or runs that command without trimming its output, the call is sent back once with how to make it smaller. Asked a second time, it goes through. `⊘` marks guarded rows; `/side-context guards clear` removes them. |
+| | `/side-context stats` | **Session stats** to share: context now and at its peak, turns, compactions, cold caches, and how much of the tool output the top eaters took. Copied to the clipboard. |
 | `s` | | Switch between the list and the `/context` grid (under **more**). |
 | `e` | | Show the largest memory files, loaded MCP tools, skills, and the tools loaded on demand. |
 | `r` | `/side-context full` | Recount exactly with the token-count API, as `/context` does (under **more**, or when a row is flagged). |
@@ -80,6 +83,7 @@ To update after a new release: `/plugin` → cc-side-context → update, then re
 | Prompt cache countdown and cold warning | | ✓ | ✓ |
 | Compaction that keeps decisions and files | | | ✓ |
 | Handoff note for a fresh session | | | ✓ |
+| Guard against the same big read next time | | | ✓ |
 | Quality budget below auto-compact | | | ✓ |
 
 ## Settings
@@ -98,13 +102,13 @@ Set in `/config` → plugin options, or with `claude plugin configure cc-side-co
 - **After `/clear` or `/resume`** the pane measures the new conversation at once. The cache countdown starts again at its first reply.
 - **Top eaters** are sized from each tool result's text (about 4 characters a token), so they read `~`. Results that compaction has already summarized drop off the list.
 - **Cache countdown** starts at the last main-thread response. The 5m/1h guess can be wrong for your setup: set `cacheTtl` if it is.
-- **Privacy.** Nothing leaves your machine apart from the exact counts. The handoff note is the only file the plugin writes.
+- **Privacy.** Nothing leaves your machine apart from the exact counts. The handoff note is the only file the plugin writes; guards are kept in the plugin's own store.
 
 ## Develop
 
 ```text
 hooks/register.tsx   the hooks module: commands, refresh, compaction, pane drawing
-hooks/analysis.ts    transcript analysis: eaters, keep-list, handoff
+hooks/analysis.ts    transcript analysis: eaters, command labels, guards, keep-list, handoff
 types/index.d.ts     state contract and snapshot types
 tests/               claude plugin test suite
 ```

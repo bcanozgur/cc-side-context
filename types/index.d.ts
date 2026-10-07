@@ -36,7 +36,14 @@ export type Snapshot = {
 
 // Tool results still in the conversation, sized from their text: one call, or
 // the same call repeated (`count` times), such as one file read again
-export type Eater = { tool: string; target: string; tokens: number; count: number }
+export type Eater = { tool: string; target: string; tokens: number; count: number; raw?: string }
+
+// A call the model is asked to narrow next time: a Read of `key` without a
+// range, or the Bash command `key` without its output trimmed
+export type Guard = { tool: 'Read' | 'Bash'; key: string; label: string; tokens: number }
+
+// Running figures for /side-context stats
+export type Stats = { turns: number; peak: number; compactions: number; colds: number }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -55,6 +62,9 @@ declare module 'claude-code' {
       warned: { cold: boolean; quality: boolean }
       // A compaction the pane started and has not heard back from yet
       compacting: boolean
+      // This project's guards, mirrored from the store so the pane redraws
+      guards: Guard[]
+      stats: Stats
     }
   }
 }
