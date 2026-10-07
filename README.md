@@ -2,7 +2,7 @@
 
 A live context-window breakdown in a side pane for [Claude Code](https://claude.com/claude-code). It shows what fills your context while you work, without having to run `/context` again and again.
 
-![cc-side-context pane beside a Claude Code session](docs/screenshot.png)
+![cc-side-context pane beside a Claude Code session](docs/pane.png)
 
 ## What it shows
 
@@ -63,3 +63,7 @@ claude plugin validate .
 claude plugin test .
 claude --plugin-dir .   # load the working copy into a session
 ```
+
+## License
+
+[MIT](LICENSE)
