@@ -4,7 +4,7 @@
 
 A live side pane for [Claude Code](https://claude.com/claude-code). It shows which tool outputs are filling your context window, when your prompt cache goes cold, and when a long conversation has started to lose track. When it is time to act, one key compacts while keeping your decisions, or writes a handoff note for a fresh session.
 
-<img src="docs/pane-original.png" alt="cc-side-context pane in a Claude Code session" width="380">
+<img src="docs/pane.png" alt="cc-side-context pane in a Claude Code session" width="420">
 
 ## Why
 
