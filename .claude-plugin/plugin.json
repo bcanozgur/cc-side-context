@@ -1,7 +1,32 @@
 {
   "name": "cc-side-context",
-  "version": "0.2.0",
-  "description": "Live context-window breakdown in a side pane, toggled with /side-context",
+  "version": "0.3.0",
+  "description": "See what is eating your Claude Code context, live in a side pane, and fix it in one key: top context eaters, prompt-cache countdown, compaction that keeps your decisions, handoff notes",
+  "author": { "name": "bcanozgur", "url": "https://github.com/bcanozgur" },
+  "homepage": "https://github.com/bcanozgur/cc-side-context",
+  "repository": "https://github.com/bcanozgur/cc-side-context",
+  "keywords": ["context", "context-window", "compact", "tokens", "prompt-cache", "side-pane"],
   "types": "./types/index.d.ts",
-  "license": "MIT"
+  "license": "MIT",
+  "userConfig": {
+    "qualityBudget": {
+      "type": "number",
+      "title": "Quality budget (tokens)",
+      "description": "Warn and suggest compacting once context passes this many tokens, before auto-compact would. Long conversations tend to lose early details well before a 1M window is full. 0 turns it off.",
+      "default": 250000
+    },
+    "smartCompact": {
+      "type": "boolean",
+      "title": "Smart compaction",
+      "description": "Tell every compaction to keep your goal and rules, changed files, decisions and the next step.",
+      "default": true
+    },
+    "cacheTtl": {
+      "type": "string",
+      "title": "Prompt cache lifetime",
+      "description": "How long the prompt cache lives, for the countdown. auto takes 1h on a subscription and 5m on an API key.",
+      "default": "auto",
+      "options": ["auto", "5m", "1h"]
+    }
+  }
 }

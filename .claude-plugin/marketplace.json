@@ -1,5 +1,6 @@
 {
   "name": "cc-side-context",
+  "description": "A live context-window pane for Claude Code: what fills your context, and one-key fixes",
   "owner": { "name": "berkecanozgur" },
   "plugins": [{ "name": "cc-side-context", "source": "./" }]
 }
