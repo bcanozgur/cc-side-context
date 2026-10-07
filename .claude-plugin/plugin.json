@@ -1,0 +1,6 @@
+{
+  "name": "cc-side-context",
+  "version": "0.2.0",
+  "description": "Live context-window breakdown in a side pane, toggled with /side-context",
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,5 @@
+{
+  "name": "cc-side-context",
+  "owner": { "name": "berkecanozgur" },
+  "plugins": [{ "name": "cc-side-context", "source": "./" }]
+}
