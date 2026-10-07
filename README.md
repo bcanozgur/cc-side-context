@@ -2,7 +2,7 @@
 
 A live context-window breakdown in a side pane for [Claude Code](https://claude.com/claude-code). It shows what fills your context while you work, without having to run `/context` again and again.
 
-<img src="docs/pane-view.png" alt="cc-side-context pane in a Claude Code session" width="419">
+<img src="docs/pane-original.png" alt="cc-side-context pane in a Claude Code session" width="380">
 
 ## What it shows
 
