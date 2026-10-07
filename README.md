@@ -32,7 +32,8 @@ Top context eaters
 ⊘ Bash npm test                               ~8.3k
   ↳ Read a range (offset/limit), not the whole file
 
-[ compact ] [ handoff ] [ guard ] [ more ]
+[ compact [c] ] [ handoff [w] ] [ guard [x] ]
+[ more [e] ]
 Estimate · 23:39
 ```
 
@@ -53,7 +54,7 @@ Estimate · 23:39
 | `c` | `/side-context compact` | **Compaction with a keep-list.** Tells the summary to keep your goal and rules word for word, every file changed, decisions and rejected approaches, open tasks and the next step. The same keep-list is also added to auto-compaction and to your own `/compact`. The pane shows `◌ Compacting` while the summary is written. |
 | `w` | `/side-context handoff` | **Handoff note.** Writes `.claude/side-context/handoff.md` (goal, recent requests, open todos, files changed and read, where it stopped) from the transcript, at no token cost, and copies the line to start a fresh session with. |
 | `x` | `/side-context guards` | **Don't let it happen again.** Guards the biggest eater in this project: the next time the model reads that whole file, or runs that command without trimming its output, the call is sent back once with how to make it smaller. Asked a second time, it goes through. `⊘` marks guarded rows; `/side-context guards clear` removes them. |
-| | `/side-context stats` | **Session stats** to share: context now and at its peak, turns, compactions, cold caches, and how much of the tool output the top eaters took. Copied to the clipboard. |
+| | `/side-context stats` | **Session stats** to share: context now, turns, the peak, compactions and cold caches since launch, and how much of the tool output the top eaters took. Copied to the clipboard. |
 | `s` | | Switch between the list and the `/context` grid (under **more**). |
 | `e` | | Show the largest memory files, loaded MCP tools, skills, and the tools loaded on demand. |
 | `r` | `/side-context full` | Recount exactly with the token-count API, as `/context` does (under **more**, or when a row is flagged). |

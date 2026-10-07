@@ -10,6 +10,7 @@ import {
   guardMessage,
   guardOf,
   handoffOf,
+  requestsOf,
   limitName,
   preserveOf,
   sparkline,
@@ -45,7 +46,7 @@ const tick = atom({ plugin: 'cc-side-context', key: 'tick' } as const, 0)
 const warned = atom({ plugin: 'cc-side-context', key: 'warned' } as const, { cold: false, quality: false })
 const compacting = atom({ plugin: 'cc-side-context', key: 'compacting' } as const, false)
 const guards = atom({ plugin: 'cc-side-context', key: 'guards' } as const, [])
-const stats = atom({ plugin: 'cc-side-context', key: 'stats' } as const, { turns: 0, peak: 0, compactions: 0, colds: 0 })
+const stats = atom({ plugin: 'cc-side-context', key: 'stats' } as const, { peak: 0, compactions: 0, colds: 0 })
 
 // What each /context row is called, the size past which it is unusually
 // large, and what to do about it. Matched on the row's name with "(deferred)" stripped.
@@ -247,8 +248,10 @@ const statsOf = async ($: EngineInterface): Promise<string> => {
   const width = Math.max(0, ...top.map(t => `${toolLabel(t.tool)} ${t.target}${t.count > 1 ? ` ×${t.count}` : ''}`.length))
   return [
     'Session stats',
-    ...(snap ? [`Context      ${fmt(snap.tokens)} / ${fmt(snap.window)} now · peak ${fmt(Math.max(s.peak, snap.tokens))}`] : []),
-    `Turns        ${s.turns} · compactions ${s.compactions} · cache went cold ${s.colds}×${snap?.cost !== undefined && snap.cost >= 0.01 ? ` · $${snap.cost.toFixed(2)}` : ''}`,
+    ...(snap ? [`Context      ${fmt(snap.tokens)} / ${fmt(snap.window)}`] : []),
+    `Turns        ${requestsOf(messages).length}${snap?.cost !== undefined && snap.cost >= 0.01 ? ` · $${snap.cost.toFixed(2)}` : ''}`,
+    // The transcript keeps no sizes or cache times, so these count from launch
+    `Since launch peak ${fmt(Math.max(s.peak, snap?.tokens ?? 0))} · compactions ${s.compactions} · cache went cold ${s.colds}×`,
     `Tool output  ~${fmt(output)} in context${top.length > 0 ? ` · the top ${top.length} took ${share}%` : ''}`,
     ...top.map(t => {
       const label = `${toolLabel(t.tool)} ${t.target}${t.count > 1 ? ` ×${t.count}` : ''}`
@@ -307,7 +310,7 @@ const restart = async ($: EngineInterface) => {
   await update($, last, () => null)
   await update($, delta, () => 0)
   await update($, warned, () => ({ cold: false, quality: false }))
-  await update($, stats, () => ({ turns: 0, peak: 0, compactions: 0, colds: 0 }))
+  await update($, stats, () => ({ peak: 0, compactions: 0, colds: 0 }))
   await update($, snapshot, () => null)
 }
 
@@ -457,7 +460,6 @@ export const register: Register = (on, options) => {
       await update($, lastReply, () => at)
       await update($, tick, () => at)
       await update($, warned, w => ({ ...w, cold: false }))
-      await update($, stats, s => ({ ...s, turns: s.turns + 1 }))
       if (await isOpen($)) void scan($).catch(() => undefined)
     }
     return next(e)
@@ -743,16 +745,16 @@ export const register: Register = (on, options) => {
         {!isStorage && isExpanded && list('Largest skills', snap.skills, ITEM_LIMIT.skills)}
 
         <Box marginTop={1} width={width} gap={1} flexWrap="wrap">
-          <Button key="compact" hotkey="c" label={isCompacting ? 'compacting…' : 'compact'} onPress={() => void compact($)} />
-          <Button key="handoff" hotkey="w" label="handoff" onPress={() => void handoffPressed($)} />
-          {canGuard && <Button key="guard" hotkey="x" label="guard" onPress={() => void guardPressed($).catch(() => undefined)} />}
-          <Button key="details" hotkey="e" label={isExpanded ? 'less' : 'more'} onPress={() => void update($, expanded, v => !v)} />
+          <Button key="compact" hotkey="c" label={`${isCompacting ? 'compacting…' : 'compact'} [c]`} onPress={() => void compact($)} />
+          <Button key="handoff" hotkey="w" label="handoff [w]" onPress={() => void handoffPressed($)} />
+          {canGuard && <Button key="guard" hotkey="x" label="guard [x]" onPress={() => void guardPressed($).catch(() => undefined)} />}
+          <Button key="details" hotkey="e" label={`${isExpanded ? 'less' : 'more'} [e]`} onPress={() => void update($, expanded, v => !v)} />
           {/* The finer tools wait behind "more", so the everyday row stays short */}
           {(isExpanded || isStorage) && (
             <Button
               key="storage"
               hotkey="s"
-              label={isStorage ? 'list' : 'grid'}
+              label={`${isStorage ? 'list' : 'grid'} [s]`}
               onPress={() => {
                 void update($, storage, v => !v)
                 // The grid is /context's, so it is drawn from /context's own count
@@ -761,7 +763,7 @@ export const register: Register = (on, options) => {
             />
           )}
           {(isExpanded || flagged.length > 0) && (
-            <Button key="exact" hotkey="r" label="exact" onPress={() => void refresh($, 'full').catch(() => undefined)} />
+            <Button key="exact" hotkey="r" label="exact [r]" onPress={() => void refresh($, 'full').catch(() => undefined)} />
           )}
         </Box>
         <Box width={width}>

@@ -42,8 +42,9 @@ export type Eater = { tool: string; target: string; tokens: number; count: numbe
 // range, or the Bash command `key` without its output trimmed
 export type Guard = { tool: 'Read' | 'Bash'; key: string; label: string; tokens: number }
 
-// Running figures for /side-context stats
-export type Stats = { turns: number; peak: number; compactions: number; colds: number }
+// Running figures for /side-context stats, counted from launch: the
+// transcript keeps no sizes or cache times
+export type Stats = { peak: number; compactions: number; colds: number }
 
 declare module 'claude-code' {
   interface PluginState {

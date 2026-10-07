@@ -417,8 +417,10 @@ test('/side-context stats sums up the session and copies it', async ($, on) => {
   await $.turn.complete(turn)
 
   const { text } = await $.command.run(run('stats'))
-  expect(text).toContain('84.0k / 200.0k now')
+  expect(text).toContain('84.0k / 200.0k')
+  // turns come from the transcript, so a resumed session counts them all
   expect(text).toContain('Turns        1')
+  expect(text).toContain('Since launch peak 84.0k')
   expect(text).toContain('Read src/big.ts ×2')
   expect(text).toContain('the top 2 took 100%')
   expect(copied[0]).toContain('Session stats')
