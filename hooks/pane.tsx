@@ -1,4 +1,4 @@
-import type { EngineInterface } from 'claude-code'
+import type { Color, EngineInterface, RenderChildren } from 'claude-code'
 
 import type { Guard, Item, Live, Picker, Row, Snapshot } from '../types'
 import { agoOf, eaterLabel, fitWidth, fmt, guardOf, isGuarded, limitName, padWidth, sparkline, tipOf, widthOf } from './analysis'
@@ -68,6 +68,8 @@ export type PaneData = {
   picker: Picker
   now: number
   columns: number
+  // The rows a docked pane has, so the actions can sit at its foot
+  rows?: number
   quality: number
   // How long the prompt cache lives, in ms
   ttl: number
@@ -88,8 +90,12 @@ export type PaneActions = {
 type Ui = ReturnType<EngineInterface['ui']['resolve']>
 
 export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneActions) => {
-  // The pane's full body, so dragging the divider either way moves the right edge with it
-  const width = Math.max(1, d.columns)
+  // The pane's full body, so dragging the divider either way moves the right
+  // edge with it. Each group is a framed card; too narrow for a frame and its
+  // padding, the groups just stack. `width` is what a card holds inside.
+  const outer = Math.max(1, d.columns)
+  const isFramed = outer >= 20
+  const width = isFramed ? outer - 4 : outer
   const snap = d.live.snapshot
   const isStorage = d.storage
 
@@ -192,29 +198,41 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
     ...(snap.cost !== undefined && snap.cost >= 0.01 ? [`$${snap.cost.toFixed(2)}`] : []),
   ]
 
-  const list = (title: string, items: Item[], limit: number) => (
-    <Box flexDirection="column" marginTop={1}>
-      <Text bold>{title}</Text>
-      {items.length === 0 ? hint('none') : items.map(i => line({ label: i.name, value: fmt(i.tokens), flag: i.tokens > limit, dim: true }))}
-    </Box>
-  )
+  // A group of the pane: a rounded frame with its title set in the top edge
+  const card = (title: string, children: RenderChildren, color?: Color) =>
+    isFramed ? (
+      <Box flexDirection="column" width={outer} borderStyle="round" borderColor={color ?? 'subtle'} paddingX={1} flexShrink={0}>
+        <Box position="absolute" top={-1} left={0}>
+          <Text bold color={color}>{fitWidth(` ${title} `, width)}</Text>
+        </Box>
+        {children}
+      </Box>
+    ) : (
+      <Box flexDirection="column" width={outer} marginTop={1} flexShrink={0}>
+        <Text bold color={color} wrap="truncate-end">
+          {title}
+        </Text>
+        {children}
+      </Box>
+    )
+
+  const list = (title: string, items: Item[], limit: number) =>
+    card(
+      title,
+      items.length === 0 ? hint('none') : items.map(i => line({ label: i.name, value: fmt(i.tokens), flag: i.tokens > limit, dim: true })),
+    )
 
   // /context's grid and the rows beside it, stacked: the pane is too narrow
   // to hold them side by side
   const storageView = () => {
     const cols = snap.grid[0]?.length ?? 0
     const gap = width >= cols * 2 ? ' ' : ''
-    return (
-      <Box flexDirection="column" marginTop={1}>
-        <Box width={width}>
-          <Text wrap="truncate-end">
-            <Text bold>Context Usage</Text>
-            <Text dimColor>{snap.model ? `  ${snap.model}` : ''}</Text>
-          </Text>
-        </Box>
+    return card(
+      'Context Usage',
+      <Box flexDirection="column">
         <Box width={width}>
           <Text dimColor wrap="truncate-end">
-            {`${fmt(snap.counted)}/${fmt(snap.measuredAgainst)} tokens (${Math.round((snap.counted / (snap.measuredAgainst || 1)) * 100)}%)`}
+            {`${snap.model ? `${snap.model} · ` : ''}${fmt(snap.counted)}/${fmt(snap.measuredAgainst)} tokens (${Math.round((snap.counted / (snap.measuredAgainst || 1)) * 100)}%)`}
           </Text>
         </Box>
         {snap.grid.length === 0 ? (
@@ -244,32 +262,34 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
             </Box>
           ))}
         </Box>
-      </Box>
+      </Box>,
     )
   }
 
   // Past sessions to resume, offered only before the first message
   const canResume = d.live.fresh === true
   const picker = canResume ? d.picker : ({ state: 'closed' } as Picker)
-  const resumeView = () => (
-    <Box flexDirection="column" marginTop={1}>
-      <Text bold>Resume a session</Text>
-      {picker.state === 'loading' && hint('Reading past sessions…')}
-      {picker.state === 'open' && picker.sessions.length === 0 && hint('No past sessions in this project')}
-      {picker.state === 'open' &&
-        picker.sessions.map((r, i) => {
-          const when = agoOf(d.now - r.at)
-          const room = Math.max(1, width - widthOf(when) - 9)
-          return (
-            <Box width={width}>
-              <Button key={`resume-${i + 1}`} hotkey={String(i + 1)} label={`${i + 1} ${fitWidth(r.title, room)}`} onPress={() => actions.pick(r.id)} />
-              <Text dimColor>{` ${when}`}</Text>
-            </Box>
-          )
-        })}
-      {picker.state === 'open' && picker.sessions.length > 0 && hint('Press a number to continue that session')}
-    </Box>
-  )
+  const resumeView = () =>
+    card(
+      'Resume a session',
+      <Box flexDirection="column">
+        {picker.state === 'loading' && hint('Reading past sessions…')}
+        {picker.state === 'open' && picker.sessions.length === 0 && hint('No past sessions in this project')}
+        {picker.state === 'open' &&
+          picker.sessions.map((r, i) => {
+            const when = agoOf(d.now - r.at)
+            const room = Math.max(1, width - widthOf(when) - 9)
+            return (
+              <Box width={width}>
+                <Button key={`resume-${i + 1}`} hotkey={String(i + 1)} label={`${i + 1} ${fitWidth(r.title, room)}`} onPress={() => actions.pick(r.id)} />
+                <Text dimColor>{` ${when}`}</Text>
+              </Box>
+            )
+          })}
+        {picker.state === 'open' && picker.sessions.length > 0 && hint('Press a number to continue that session')}
+      </Box>,
+      'claude',
+    )
 
   const eaten = scaled(d.live)
   const inUse = inWindow.filter(r => r.kind === 'used')
@@ -277,33 +297,50 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
   const time = new Date(snap.at).toTimeString().slice(0, 5)
   const footer = isExact ? `Exact count · ${time}` : flagged.length > 0 ? `Estimate · ? may be large, r to check · ${time}` : `Estimate · ${time}`
   const change = d.live.delta
+  const percent = Math.round((snap.tokens / (snap.window || 1)) * 100)
 
-  return (
-    <Box flexDirection="column" width={width}>
+  // The bar, two rows tall so it reads at a glance
+  const bar = (
+    <Text>
+      {segments.map(s =>
+        s.cells > 0 ? (
+          <Text color={s.kind === 'free' ? 'subtle' : s.color}>{(s.kind === 'free' ? '░' : s.kind === 'buffer' ? '▒' : '█').repeat(s.cells)}</Text>
+        ) : null,
+      )}
+    </Text>
+  )
+
+  const summary = card(
+    TITLE,
+    <Box flexDirection="column">
       <Box width={width} justifyContent="space-between">
         <Box flexShrink={1}>
-          <Text wrap="truncate-end">
-            <Text bold color={status.color}>
-              {status.text}
-            </Text>
-            <Text bold>{`  ${fmt(snap.tokens)}`}</Text>
-            <Text dimColor>{` / ${fmt(snap.window)}`}</Text>
+          <Text bold color={status.color} wrap="truncate-end">
+            {status.text}
           </Text>
         </Box>
         <Box flexShrink={0}>
           <Text color={change > 0 ? 'warning' : 'success'}>{change === 0 ? '' : ` ${change > 0 ? '+' : '−'}${fmt(Math.abs(change))}`}</Text>
         </Box>
       </Box>
+      <Box width={width} justifyContent="space-between" marginTop={1}>
+        <Box flexShrink={1}>
+          <Text wrap="truncate-end">
+            <Text bold>{fmt(snap.tokens)}</Text>
+            <Text dimColor>{` / ${fmt(snap.window)}`}</Text>
+          </Text>
+        </Box>
+        <Box flexShrink={0}>
+          <Text bold color={status.color}>{` ${percent}%`}</Text>
+        </Box>
+      </Box>
       {!isStorage && (
-        <Text>
-          {segments.map(s =>
-            s.cells > 0 ? (
-              <Text color={s.kind === 'free' ? 'subtle' : s.color}>{(s.kind === 'free' ? '░' : s.kind === 'buffer' ? '▒' : '█').repeat(s.cells)}</Text>
-            ) : null,
-          )}
-        </Text>
+        <Box flexDirection="column">
+          {bar}
+          {bar}
+        </Box>
       )}
-      <Box width={width}>
+      <Box width={width} marginTop={1}>
         <Text wrap="truncate-end">
           <Text color="claude">{spark}</Text>
           <Text dimColor>{room}</Text>
@@ -320,54 +357,45 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
           </Text>
         </Box>
       )}
+    </Box>,
+    status.color,
+  )
 
-      {/* What is in the window; free space and the reserve are the bar's pale end */}
-      {!isStorage && (
-        <Box flexDirection="column" marginTop={1}>
-          {inUse.map(r => {
-            const heavy = isHeavy(r, snap, d.quality)
-            return (
-              <Box flexDirection="column">
-                {line({ mark: '■ ', markColor: r.color, label: labelOf(r.name), value: fmt(r.tokens), flag: heavy })}
-                {heavy && advice(ruleOf(r.name)?.fix ?? 'Bigger than usual')}
-              </Box>
-            )
-          })}
+  // What is in the window; free space and the reserve are the bar's pale end
+  const breakdown = card(
+    'In context',
+    inUse.map(r => {
+      const heavy = isHeavy(r, snap, d.quality)
+      return (
+        <Box flexDirection="column">
+          {line({ mark: '■ ', markColor: r.color, label: labelOf(r.name), value: fmt(r.tokens), flag: heavy })}
+          {heavy && advice(ruleOf(r.name)?.fix ?? 'Bigger than usual')}
         </Box>
-      )}
+      )
+    }),
+  )
 
-      {isStorage && storageView()}
+  const eaters = card(
+    'Top context eaters',
+    <Box flexDirection="column">
+      {eaten.map(t => {
+        const g = guardOf(t)
+        return line({
+          mark: g !== undefined && isGuarded(d.guards, g) ? '⊘ ' : '  ',
+          markColor: 'success',
+          label: eaterLabel(t),
+          value: `~${fmt(t.tokens)}`,
+          dim: true,
+        })
+      })}
+      {eaten[0] && advice(tipOf(eaten[0].tool))}
+    </Box>,
+  )
 
-      {picker.state !== 'closed' && resumeView()}
-
-      {!isStorage && eaten.length > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold>Top context eaters</Text>
-          {eaten.map(t => {
-            const g = guardOf(t)
-            return line({
-              mark: g !== undefined && isGuarded(d.guards, g) ? '⊘ ' : '  ',
-              markColor: 'success',
-              label: eaterLabel(t),
-              value: `~${fmt(t.tokens)}`,
-              dim: true,
-            })
-          })}
-          {eaten[0] && advice(tipOf(eaten[0].tool))}
-        </Box>
-      )}
-
-      {!isStorage && d.expanded && deferred.length > 0 && (
-        <Box flexDirection="column" marginTop={1}>
-          <Text bold>Loaded on demand (not in context)</Text>
-          {deferred.map(r => line({ label: labelOf(r.name), value: fmt(r.tokens), dim: true }))}
-        </Box>
-      )}
-      {!isStorage && d.expanded && list('Memory files', snap.memory, ITEM_LIMIT.memory)}
-      {!isStorage && d.expanded && list('Loaded MCP tools', snap.mcp, ITEM_LIMIT.mcp)}
-      {!isStorage && d.expanded && list('Largest skills', snap.skills, ITEM_LIMIT.skills)}
-
-      <Box marginTop={1} width={width} gap={1} flexWrap="wrap">
+  const controls = card(
+    'Actions',
+    <Box flexDirection="column">
+      <Box width={width} gap={1} flexWrap="wrap">
         <Button key="compact" hotkey="c" label={`${d.compacting ? 'compacting…' : 'compact'} [c]`} onPress={actions.compact} />
         <Button key="handoff" hotkey="w" label="handoff [w]" onPress={actions.handoff} />
         {canGuard && <Button key="guard" hotkey="x" label="guard [x]" onPress={actions.guard} />}
@@ -382,6 +410,30 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
           {footer}
         </Text>
       </Box>
+    </Box>,
+  )
+
+  // Docked, the pane is at least as tall as its room and the actions sit at
+  // its foot; a taller tree scrolls and they come last
+  return (
+    <Box flexDirection="column" width={outer} minHeight={d.rows}>
+      {summary}
+      {!isStorage && inUse.length > 0 && breakdown}
+      {isStorage && storageView()}
+      {picker.state !== 'closed' && resumeView()}
+      {!isStorage && eaten.length > 0 && eaters}
+      {!isStorage &&
+        d.expanded &&
+        deferred.length > 0 &&
+        card(
+          'Loaded on demand',
+          deferred.map(r => line({ label: labelOf(r.name), value: fmt(r.tokens), dim: true })),
+        )}
+      {!isStorage && d.expanded && list('Memory files', snap.memory, ITEM_LIMIT.memory)}
+      {!isStorage && d.expanded && list('Loaded MCP tools', snap.mcp, ITEM_LIMIT.mcp)}
+      {!isStorage && d.expanded && list('Largest skills', snap.skills, ITEM_LIMIT.skills)}
+      <Box flexGrow={1} />
+      {controls}
     </Box>
   )
 }

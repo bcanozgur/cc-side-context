@@ -715,6 +715,7 @@ export const register: Register = (on, options) => {
       picker: await read($, picker),
       now: Math.max(await read($, tick), await $.clock.now()),
       columns: e.props.bodyColumns,
+      rows: e.props.placement === 'dock' ? e.props.scroll?.bodyRows : undefined,
       quality,
       ttl: ttlOf(options, l.snapshot),
     }

@@ -6,6 +6,8 @@
 
 - `resume [p]`: in a new session, before the first message, the pane lists this project's 5 latest sessions with their names and ages, and a number key resumes one (the same as `/resume`). The button goes away once the conversation starts.
 
+- The pane is laid out in framed cards: the summary, what is in context, top context eaters and the actions, each with its title in the frame. The summary is larger: tokens and percent on a line of their own and a two-row bar. Docked, the actions card sits at the foot of the pane.
+
 **Fixes**
 
 - After a compaction, the handoff note's **Goal** is your first request again, not the compaction summary. The goal is kept per session, so a `/resume` still has it. `/side-context stats` no longer counts the summary as a turn.
