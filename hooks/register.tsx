@@ -1,95 +1,81 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, PluginOptions, Register, SessionContextUsage, SessionUsage } from 'claude-code'
+import type { EngineInterface, PluginOptions, Register, SessionContextUsage, SessionMessage, SessionUsage } from 'claude-code'
 
-import type { Guard, Item, Legend, Row, Snapshot, Square } from '../types'
+import type { Guard, Legend, Live, Memo, Picker, Recent, Snapshot, Square } from '../types'
 import {
+  EaterIndex,
+  GUARD_FLOOR,
   PRESERVE_MARK,
-  eatersOf,
+  bashKey,
+  projectSlug,
+  titleOf,
+  eaterLabel,
   fmt,
   guardHit,
   guardMessage,
-  guardOf,
   handoffOf,
-  requestsOf,
-  limitName,
+  isLive,
+  padWidth,
   preserveOf,
-  sparkline,
+  requestsOf,
   stamp,
-  tipOf,
-  toolLabel,
+  summariesOf,
   toolTokens,
+  widthOf,
 } from './analysis'
+import { TITLE, drawPane, glyphOf, nextGuard, scaled, top } from './pane'
 
 export { fmt }
 
 const PANE = 'side-context'
-const TITLE = 'Context'
-// Wider than this and the numbers drift too far from their labels to read
-const MAX_WIDTH = 52
-const LIST_SIZE = 8
 // Turns of context the trend line keeps
 const HISTORY = 48
 const HANDOFF = '.claude/side-context/handoff.md'
+const HANDOFF_PREV = '.claude/side-context/handoff.prev.md'
+const HANDOFF_IGNORE = '.claude/side-context/.gitignore'
 const RESUME = `Read @${HANDOFF} and continue from the next step.`
 // Below this the cold-cache warning is not worth a toast
 const COLD_FLOOR = 20_000
+// The grid view keeps /context's exact count, taken again at most this often
+const EXACT_EVERY = 60_000
+// A guarded call asked again within this long goes through
+const RETRY_WINDOW = 10 * 60_000
+// Guards one project keeps; the oldest goes first
+const MAX_GUARDS = 50
+// Sessions whose compaction memo the store keeps
+const MAX_MEMOS = 30
+// Past sessions the resume list offers
+const RECENT = 5
+// How much of a transcript's start and end is read for its title
+const PEEK = 256 * 1024
 
-const snapshot = atom({ plugin: 'cc-side-context', key: 'snapshot' } as const, null)
-const delta = atom({ plugin: 'cc-side-context', key: 'delta' } as const, 0)
-const last = atom({ plugin: 'cc-side-context', key: 'last' } as const, null)
+const FRESH: Live = {
+  snapshot: null,
+  delta: 0,
+  last: null,
+  history: [],
+  eaters: [],
+  lastReply: null,
+  warned: { cold: false, quality: false },
+  stats: { peak: 0, compactions: 0, colds: 0 },
+  scale: 1,
+  exactAt: null,
+  memo: { summaries: [] },
+  fresh: null,
+}
+
+const live = atom({ plugin: 'cc-side-context', key: 'live' } as const, FRESH)
 const expanded = atom({ plugin: 'cc-side-context', key: 'expanded' } as const, false)
 const storage = atom({ plugin: 'cc-side-context', key: 'storage' } as const, false)
-const history = atom({ plugin: 'cc-side-context', key: 'history' } as const, [])
-const eaters = atom({ plugin: 'cc-side-context', key: 'eaters' } as const, [])
-const lastReply = atom({ plugin: 'cc-side-context', key: 'lastReply' } as const, null)
 const tick = atom({ plugin: 'cc-side-context', key: 'tick' } as const, 0)
-const warned = atom({ plugin: 'cc-side-context', key: 'warned' } as const, { cold: false, quality: false })
 const compacting = atom({ plugin: 'cc-side-context', key: 'compacting' } as const, false)
 const guards = atom({ plugin: 'cc-side-context', key: 'guards' } as const, [])
-const stats = atom({ plugin: 'cc-side-context', key: 'stats' } as const, { peak: 0, compactions: 0, colds: 0 })
+const picker = atom({ plugin: 'cc-side-context', key: 'picker' } as const, { state: 'closed' } as Picker)
 
-// What each /context row is called, the size past which it is unusually
-// large, and what to do about it. Matched on the row's name with "(deferred)" stripped.
-type Rule = { test: RegExp; label: string; limit?: number; fix?: string }
-const RULES: Rule[] = [
-  { test: /^system prompt/i, label: 'System prompt', limit: 8_000, fix: 'Long output style or --append-system-prompt' },
-  { test: /^system tools/i, label: 'Built-in tools', limit: 40_000, fix: 'Many tool schemas loaded up front' },
-  { test: /^mcp tools/i, label: 'MCP tools', limit: 10_000, fix: 'Disable unused servers in /mcp' },
-  { test: /^mcp server instructions/i, label: 'MCP instructions', limit: 3_000, fix: 'An MCP server sends long instructions' },
-  { test: /^custom agents/i, label: 'Subagents', limit: 3_000, fix: 'Shorten agent descriptions' },
-  { test: /^memory files/i, label: 'Memory (CLAUDE.md, rules)', limit: 8_000, fix: 'Trim large CLAUDE.md / rules files' },
-  { test: /^skills/i, label: 'Skills', limit: 8_000, fix: 'Disable unused plugins in /plugin' },
-  { test: /^slash commands/i, label: 'Slash commands', limit: 3_000 },
-  { test: /^messages/i, label: 'Conversation', fix: 'Press c to compact, or w to hand off and /clear' },
-  { test: /^autocompact buffer/i, label: 'Compact reserve' },
-  { test: /^free space/i, label: 'Free' },
-]
-const ITEM_LIMIT = { memory: 3_000, mcp: 1_500, skills: 800 } as const
+// Several figures change together: they land in one write, one redraw
+const patch = ($: EngineInterface, fn: (l: Live) => Partial<Live>) => update($, live, l => ({ ...l, ...fn(l) }))
 
-const ruleOf = (name: string): Rule | undefined => RULES.find(r => r.test.test(name.replace(/\s*\(deferred\)\s*$/i, '')))
-const labelOf = (name: string) => ruleOf(name)?.label ?? name.replace(/\s*\(deferred\)\s*$/i, '')
-
-// Where the pane starts to worry: auto-compact, or sooner the quality budget,
-// past which long conversations tend to lose track of early details
-const budgetOf = (snap: Snapshot, quality: number): number => {
-  const compact = snap.compactAt ?? snap.window
-  return quality > 0 ? Math.min(compact, quality) : compact
-}
-
-// Conversation is "too big" once it holds over half of the budget
-const isHeavy = (r: Row, snap: Snapshot, quality: number): boolean => {
-  if (r.kind !== 'used') return false
-  if (/^messages/i.test(r.name)) return r.tokens > budgetOf(snap, quality) * 0.5
-  const limit = ruleOf(r.name)?.limit
-  return limit !== undefined && r.tokens > limit
-}
-
-// /context's glyphs: a full square, a partly full one (under 0.7), free, reserve
-const GLYPH = { full: '⛁', partial: '⛀', free: '⛶', buffer: '⛝' } as const
-const glyphOf = (kind: Row['kind'] | undefined, fullness = 1): string =>
-  kind === 'free' ? GLYPH.free : kind === 'buffer' ? GLYPH.buffer : fullness < 0.7 ? GLYPH.partial : GLYPH.full
-
-const top = (items: Item[]): Item[] => [...items].sort((a, b) => b.tokens - a.tokens).slice(0, LIST_SIZE)
+const percentOf = (tokens: number, window: number) => (window > 0 ? Math.round((tokens / window) * 100) : 0)
 
 export const toSnapshot = (
   context: SessionContextUsage,
@@ -126,7 +112,7 @@ export const toSnapshot = (
     detail,
     tokens,
     window,
-    percent: context.percent ?? (window > 0 ? Math.round((tokens / window) * 100) : 0),
+    percent: context.percent ?? percentOf(tokens, window),
     compactAt: b?.isAutoCompactEnabled ? b.autoCompactThreshold : undefined,
     rows: categories.map(c => ({ name: c.name, tokens: c.tokens, color: c.color, kind: c.kind })),
     memory: top((b?.memoryFiles ?? []).map(f => ({ name: f.path.split('/').slice(-2).join('/'), tokens: f.tokens }))),
@@ -146,27 +132,171 @@ export const toSnapshot = (
   }
 }
 
+// The tool results already counted, so each scan folds in only the new ones
+const index = new EaterIndex()
+
+// An exact count of the conversation over the transcript's own estimate:
+// how far off "about four characters a token" is for this session
+const scaleOf = (snap: Snapshot): number | undefined => {
+  const exact = snap.rows.find(r => /^messages/i.test(r.name))?.tokens
+  if (exact === undefined || index.total < 2_000) return undefined
+  return Math.min(1.6, Math.max(0.6, exact / index.total))
+}
 
 const refresh = async ($: EngineInterface, detail: Snapshot['detail']) => {
   const usage = await $.session.usage({ breakdown: detail })
-  const next = toSnapshot(usage.context, detail, await $.clock.now(), usage)
-  await update($, snapshot, () => next)
-  await update($, stats, s => ({ ...s, peak: Math.max(s.peak, next.tokens) }))
-  // The trend starts from the first reading, not from the first turn after it
-  if (next.tokens > 0) await update($, history, h => (h.length === 0 ? [next.tokens] : h))
+  const now = await $.clock.now()
+  const next = toSnapshot(usage.context, detail, now, usage)
+  const scale = detail === 'full' ? scaleOf(next) : undefined
+  await patch($, l => ({
+    snapshot: next,
+    stats: { ...l.stats, peak: Math.max(l.stats.peak, next.tokens) },
+    // The trend starts from the first reading, not from the first turn after it
+    history: l.history.length === 0 && next.tokens > 0 ? [next.tokens] : l.history,
+    ...(detail === 'full' ? { exactAt: now, ...(scale !== undefined ? { scale } : {}) } : {}),
+  }))
 }
 
 // The tool results still in the conversation, biggest first
-const scan = async ($: EngineInterface) => {
-  const messages = await $.session.messages()
+const scan = async ($: EngineInterface, messages?: readonly SessionMessage[]) => {
+  const all = messages ?? (await $.session.messages())
   const cwd = await $.session.cwd().catch(() => '')
-  await update($, eaters, () => eatersOf(messages, 5, cwd))
+  index.update(all, cwd)
+  const fresh = requestsOf(all).length === 0
+  await patch($, () => ({ eaters: index.top(5), fresh }))
+  if (!fresh) await closePicker($)
 }
 
 // Both at once, in the background: a failed read leaves the last figures up
 const remeasure = ($: EngineInterface, detail: Snapshot['detail'] = 'summary') => {
   void refresh($, detail).catch(() => undefined)
   void scan($).catch(() => undefined)
+}
+
+// A compaction's conversation is installed only once its hook chain returns,
+// and the fill stays unreported until the next response: a reading taken
+// straight away still sees the old one. The pane takes core's own count now
+// and measures again once the new conversation is in place.
+const settle = async ($: EngineInterface, before?: number, after?: number) => {
+  if (after !== undefined) {
+    await patch($, l => ({
+      snapshot: l.snapshot === null ? null : { ...l.snapshot, tokens: after, percent: percentOf(after, l.snapshot.window) },
+      delta: before === undefined ? 0 : after - before,
+      last: after,
+      history: [...l.history, after].slice(-HISTORY),
+      warned: { ...l.warned, quality: false },
+    }))
+  }
+  $.clock.after(500, () => remeasure($))
+}
+
+// What compactions took out of the transcript, kept per session in the store
+// as well, so a /resume still knows the first request
+const memoKey = async ($: EngineInterface) => `memo:${await $.session.id()}`
+
+const isMemo = (v: unknown): v is Memo => typeof v === 'object' && v !== null && Array.isArray((v as Memo).summaries)
+
+const memoOf = async ($: EngineInterface): Promise<Memo> => {
+  const memo = (await read($, live)).memo
+  if (memo.goal !== undefined || memo.summaries.length > 0) return memo
+  const stored = await memoKey($)
+    .then(k => $.store.get(k))
+    .catch(() => undefined)
+  return isMemo(stored) ? { ...(typeof stored.goal === 'string' ? { goal: stored.goal } : {}), summaries: stored.summaries.filter(s => typeof s === 'string') } : memo
+}
+
+const remember = async ($: EngineInterface, before: readonly SessionMessage[], after: readonly SessionMessage[]) => {
+  const memo = await memoOf($)
+  const goal = memo.goal ?? requestsOf(before, memo.summaries)[0]
+  const next: Memo = { ...(goal !== undefined ? { goal } : {}), summaries: [...memo.summaries, ...summariesOf(before, after)].slice(-10) }
+  await patch($, () => ({ memo: next }))
+  try {
+    const key = await memoKey($)
+    await $.store.set(key, next)
+    const memos = (await $.store.keys()).filter(k => k.startsWith('memo:') && k !== key)
+    for (const old of memos.slice(0, Math.max(0, memos.length - MAX_MEMOS + 1))) await $.store.delete(old)
+  } catch {
+    // The memo is a nicety: without the store it lasts this session
+  }
+}
+
+// Resuming a past session, offered only before the first message: the list
+// is this project's newest transcripts, and picking one runs /resume with it
+
+const closePicker = async ($: EngineInterface) => {
+  if ((await read($, picker)).state !== 'closed') await update($, picker, () => ({ state: 'closed' }) as Picker)
+}
+
+// Where this project's transcripts are: the session's own when Claude Code
+// said so at its start, else worked out from the config directory
+let transcriptDir: string | null = null
+
+const transcriptsOf = async ($: EngineInterface): Promise<string | undefined> => {
+  if (transcriptDir !== null && (await $.fs.exists(transcriptDir).catch(() => false))) return transcriptDir
+  const cwd = await $.session.cwd()
+  const home = await $.env.get('HOME').catch(() => undefined)
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)) ?? (home ? `${home}/.claude` : undefined)
+  if (!config) return undefined
+  const dir = `${config.replace(/\/+$/, '')}/projects/${projectSlug(cwd)}`
+  return (await $.fs.exists(dir).catch(() => false)) ? dir : undefined
+}
+
+// The start and the end of a transcript, without reading all of a long one
+const peek = async ($: EngineInterface, path: string, size: number): Promise<{ head: string; tail: string }> => {
+  if (size <= PEEK * 2) {
+    const text = await $.fs.read(path)
+    return { head: text, tail: text }
+  }
+  try {
+    const [head, tail] = await Promise.all([$.process.run(['head', '-c', String(PEEK), path]), $.process.run(['tail', '-c', String(PEEK), path])])
+    if (head.exitCode === 0 && tail.exitCode === 0) return { head: head.stdout, tail: tail.stdout }
+  } catch {
+    // No head or tail on this system: read it whole below
+  }
+  const text = size <= 32 * 1024 * 1024 ? await $.fs.read(path) : ''
+  return { head: text.slice(0, PEEK), tail: text.slice(-PEEK) }
+}
+
+const recentSessions = async ($: EngineInterface): Promise<Recent[]> => {
+  const dir = await transcriptsOf($)
+  if (!dir) return []
+  const current = await $.session.id().catch(() => '')
+  const files = (await $.fs.list(dir))
+    .filter(f => f.kind === 'file' && f.name.endsWith('.jsonl') && f.name !== `${current}.jsonl` && f.size > 0)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  const found: Recent[] = []
+  // Sessions nobody typed in are skipped, so look a little further than five
+  for (const f of files.slice(0, RECENT * 3)) {
+    if (found.length >= RECENT) break
+    const { head, tail } = await peek($, `${dir}/${f.name}`, f.size).catch(() => ({ head: '', tail: '' }))
+    const title = titleOf(head, tail)
+    if (title) found.push({ id: f.name.replace(/\.jsonl$/, ''), title, at: f.mtimeMs })
+  }
+  return found
+}
+
+const resumePressed = async ($: EngineInterface) => {
+  if ((await read($, picker)).state !== 'closed') return closePicker($)
+  if ((await read($, live)).fresh !== true) return
+  await update($, picker, () => ({ state: 'loading' }) as Picker)
+  try {
+    const sessions = await recentSessions($)
+    // A message sent while the list was read closes it
+    if ((await read($, picker)).state === 'loading') await update($, picker, () => ({ state: 'open', sessions }) as Picker)
+  } catch (err) {
+    await closePicker($)
+    $.ui.toast(`Could not list past sessions: ${reasonOf(err)}`, { timeoutMs: 8_000 })
+  }
+}
+
+const pick = async ($: EngineInterface, id: string) => {
+  await closePicker($)
+  if ((await read($, live)).fresh !== true) return
+  try {
+    await $.command.run({ command: 'resume', args: id })
+  } catch (err) {
+    $.ui.toast(`Could not resume: ${reasonOf(err)}. Try /resume ${id}`, { timeoutMs: 10_000 })
+  }
 }
 
 const isOpen = async ($: EngineInterface) => (await $.ui.panes()).some(p => p.id === PANE)
@@ -192,26 +322,31 @@ const ttlOf = (options: PluginOptions, snap: Snapshot | null): number => {
 // Guards last across sessions, one list a project
 const guardKey = async ($: EngineInterface) => `guards:${await $.session.cwd().catch(() => '')}`
 
-const loadGuards = async ($: EngineInterface) => {
-  const stored = await $.store.get(await guardKey($))
-  await update($, guards, () => (Array.isArray(stored) ? (stored as Guard[]) : []))
-}
+const isGuard = (v: unknown): v is Guard =>
+  typeof v === 'object' && v !== null && ((v as Guard).tool === 'Read' || (v as Guard).tool === 'Bash') && typeof (v as Guard).key === 'string'
 
 const saveGuards = async ($: EngineInterface, fn: (gs: Guard[]) => Guard[]) => {
-  await update($, guards, fn)
+  await update($, guards, gs => fn(gs).slice(-MAX_GUARDS))
   const gs = await read($, guards)
   const key = await guardKey($)
   await (gs.length > 0 ? $.store.set(key, gs) : $.store.delete(key))
 }
 
-// The biggest eater that can be guarded and is not yet
-const nextGuard = (eaten: readonly Parameters<typeof guardOf>[0][], gs: readonly Guard[]): Guard | undefined =>
-  eaten.map(guardOf).find(g => g !== undefined && !gs.some(x => x.tool === g.tool && x.key === g.key))
+// Guards left idle past their lifetime are dropped as they load
+const loadGuards = async ($: EngineInterface) => {
+  const stored = await $.store.get(await guardKey($))
+  const now = await $.clock.now()
+  const all = Array.isArray(stored) ? stored.filter(isGuard) : []
+  const kept = all.map(g => (g.at === undefined ? { ...g, at: now } : g)).filter(g => isLive(g, now))
+  await update($, guards, () => kept)
+  if (kept.length !== all.length || all.some(g => g.at === undefined)) await saveGuards($, () => kept)
+}
 
 const guardPressed = async ($: EngineInterface) => {
-  const g = nextGuard(await read($, eaters), await read($, guards))
+  const g = nextGuard(scaled(await read($, live)), await read($, guards))
   if (!g) return
-  await saveGuards($, gs => [...gs, g])
+  const at = await $.clock.now()
+  await saveGuards($, gs => [...gs, { ...g, at, hits: 0 }])
   $.ui.toast(
     g.tool === 'Read'
       ? `Guarded: a whole read of ${g.label} now asks for a range first (this project)`
@@ -220,44 +355,62 @@ const guardPressed = async ($: EngineInterface) => {
   )
 }
 
-// A denied call made again unchanged goes through: the model asked twice
-let lastDenied: string | null = null
+// The calls sent back, and when: one asked again unchanged goes through, as
+// the model asked twice. Each call has its own entry, so parallel calls and
+// calls in between do not use up another's retry.
+const denied = new Map<string, number>()
 
 const guardCall = async ($: EngineInterface, call: { tool: string; input: Record<string, unknown> }) => {
-  const hit = guardHit(await read($, guards), call)
+  const now = await $.clock.now()
+  const hit = guardHit(await read($, guards), call, now)
   if (!hit) return undefined
-  const id = `${hit.tool}\u0000${hit.key}`
-  if (lastDenied === id) {
-    lastDenied = null
+  for (const [k, at] of denied) if (now - at > RETRY_WINDOW) denied.delete(k)
+  const id = `${hit.tool}\u0000${hit.tool === 'Bash' ? bashKey(hit.key) : hit.key}`
+  if (denied.has(id)) {
+    denied.delete(id)
     return undefined
   }
-  lastDenied = id
-  return guardMessage(hit)
+  // A file that has shrunk since is no longer worth sending back
+  let tokens = hit.tokens
+  if (hit.tool === 'Read') {
+    const size = await $.fs
+      .stat(hit.key)
+      .then(s => s.size)
+      .catch(() => undefined)
+    if (size !== undefined) {
+      tokens = Math.ceil(size / 4)
+      if (tokens < GUARD_FLOOR) return undefined
+    }
+  }
+  denied.set(id, now)
+  await saveGuards($, gs => gs.map(g => (g.tool === hit.tool && g.key === hit.key ? { ...g, lastHit: now, hits: (g.hits ?? 0) + 1 } : g))).catch(() => undefined)
+  return guardMessage(hit, tokens)
 }
 
 // A report of the session short enough to paste anywhere
 const statsOf = async ($: EngineInterface): Promise<string> => {
   const messages = await $.session.messages()
-  const cwd = await $.session.cwd().catch(() => '')
-  const snap = await read($, snapshot)
-  const s = await read($, stats)
+  await scan($, messages).catch(() => undefined)
+  const l = await read($, live)
+  const snap = l.snapshot
   const gs = await read($, guards)
-  const output = toolTokens(messages)
-  const top = eatersOf(messages, 3, cwd)
-  const share = output > 0 ? Math.round((top.reduce((sum, t) => sum + t.tokens, 0) / output) * 100) : 0
-  const width = Math.max(0, ...top.map(t => `${toolLabel(t.tool)} ${t.target}${t.count > 1 ? ` ×${t.count}` : ''}`.length))
+  const memo = await memoOf($)
+  const turns = requestsOf(messages, memo.summaries).length
+  const output = Math.round(toolTokens(messages) * l.scale)
+  const all = scaled(l)
+  const best = all.slice(0, 3)
+  const share = output > 0 ? Math.min(100, Math.round((best.reduce((sum, t) => sum + t.tokens, 0) / output) * 100)) : 0
+  const width = Math.max(0, ...best.map(t => widthOf(eaterLabel(t))))
+  const hits = gs.reduce((sum, g) => sum + (g.hits ?? 0), 0)
   return [
     'Session stats',
     ...(snap ? [`Context      ${fmt(snap.tokens)} / ${fmt(snap.window)}`] : []),
-    `Turns        ${requestsOf(messages).length}${snap?.cost !== undefined && snap.cost >= 0.01 ? ` · $${snap.cost.toFixed(2)}` : ''}`,
+    `Turns        ${turns}${memo.summaries.length > 0 ? ' since the last compaction' : ''}${snap?.cost !== undefined && snap.cost >= 0.01 ? ` · $${snap.cost.toFixed(2)}` : ''}`,
     // The transcript keeps no sizes or cache times, so these count from launch
-    `Since launch peak ${fmt(Math.max(s.peak, snap?.tokens ?? 0))} · compactions ${s.compactions} · cache went cold ${s.colds}×`,
-    `Tool output  ~${fmt(output)} in context${top.length > 0 ? ` · the top ${top.length} took ${share}%` : ''}`,
-    ...top.map(t => {
-      const label = `${toolLabel(t.tool)} ${t.target}${t.count > 1 ? ` ×${t.count}` : ''}`
-      return `  ${label.padEnd(width)}  ~${fmt(t.tokens)}`
-    }),
-    ...(gs.length > 0 ? [`Guards       ${gs.length} on in this project`] : []),
+    `Since launch peak ${fmt(Math.max(l.stats.peak, snap?.tokens ?? 0))} · compactions ${l.stats.compactions} · cache went cold ${l.stats.colds}×`,
+    `Tool output  ~${fmt(output)} in context${best.length > 0 ? ` · the top ${best.length} took ${share}%` : ''}`,
+    ...best.map(t => `  ${padWidth(eaterLabel(t), width)}  ~${fmt(t.tokens)}`),
+    ...(gs.length > 0 ? [`Guards       ${gs.length} on in this project${hits > 0 ? ` · sent back ${hits} call${hits === 1 ? '' : 's'}` : ''}`] : []),
     'github.com/bcanozgur/cc-side-context',
   ].join('\n')
 }
@@ -265,31 +418,43 @@ const statsOf = async ($: EngineInterface): Promise<string> => {
 const reasonOf = (err: unknown) => (err instanceof Error ? err.message : String(err))
 
 // Compaction with the keep-list. The plugin's own call does not pass through
-// its own compaction hook, so it brings the list itself. The pane shows
-// "Compacting…" while the summary is written, which takes a while.
+// its own compaction hook, so it brings the list and does its own counting.
+// The pane shows "Compacting…" while the summary is written, which takes a while.
 const compact = async ($: EngineInterface) => {
   if (await read($, compacting)) return
   await update($, compacting, () => true)
+  let figures: { before?: number; after?: number } = {}
   try {
-    const result = await $.session.compact({ instructions: preserveOf(await $.session.messages()) })
+    const messages = await $.session.messages()
+    const result = await $.session.compact({ instructions: preserveOf(messages) })
     if (result.skip !== undefined) $.ui.toast(`Not compacted: ${result.skip}`)
     else {
       const { tokensBefore: before, tokensAfter: after } = result
-      await update($, stats, s => ({ ...s, compactions: s.compactions + 1 }))
+      figures = { before, after }
+      await patch($, l => ({ stats: { ...l.stats, compactions: l.stats.compactions + 1 } }))
+      await remember($, messages, result.messages)
       $.ui.toast(before !== undefined && after !== undefined ? `Compacted ${fmt(before)} → ${fmt(after)}; decisions and changed files kept` : 'Compacted')
     }
   } catch (err) {
     $.ui.toast(`Compaction failed: ${reasonOf(err)}`, { timeoutMs: 10_000 })
   } finally {
     await update($, compacting, () => false)
-    remeasure($)
+    await settle($, figures.before, figures.after)
   }
 }
 
+// The note goes in the project, so it keeps itself out of git, and the one
+// before it is kept beside it
 const handoff = async ($: EngineInterface): Promise<string> => {
   const messages = await $.session.messages()
-  await $.fs.write(HANDOFF, handoffOf(messages, stamp(await $.clock.now())))
-  await $.ui.copy({ text: RESUME })
+  const note = handoffOf(messages, stamp(await $.clock.now()), await memoOf($))
+  const prev = await $.fs.read(HANDOFF).catch(() => undefined)
+  await $.fs.write(HANDOFF, note)
+  if (typeof prev === 'string' && prev.trim() && prev !== note) await $.fs.write(HANDOFF_PREV, prev).catch(() => undefined)
+  if (!(await $.fs.exists(HANDOFF_IGNORE).catch(() => true))) {
+    await $.fs.write(HANDOFF_IGNORE, '# Written by cc-side-context: handoff notes hold your prompts, so they stay out of git\n*\n').catch(() => undefined)
+  }
+  await $.ui.copy({ text: RESUME }).catch(() => undefined)
   return `Handoff written to ${HANDOFF}. Run /clear, then paste (copied): ${RESUME}`
 }
 
@@ -301,34 +466,23 @@ const handoffPressed = async ($: EngineInterface) => {
   }
 }
 
-// A conversation that replaced the last one (/clear, /resume) starts the
-// running figures over and is measured at once, not at its first reply
-const restart = async ($: EngineInterface) => {
-  await update($, history, () => [])
-  await update($, eaters, () => [])
-  await update($, lastReply, () => null)
-  await update($, last, () => null)
-  await update($, delta, () => 0)
-  await update($, warned, () => ({ cold: false, quality: false }))
-  await update($, stats, () => ({ peak: 0, compactions: 0, colds: 0 }))
-  await update($, snapshot, () => null)
-}
-
 // Every half minute: the cache countdown moves, a cache gone cold gets one
 // warning, and a pane still without figures is measured again
 const onTick = async ($: EngineInterface, options: PluginOptions) => {
+  const open = await isOpen($)
+  const l = await read($, live)
   const now = await $.clock.now()
-  await update($, tick, () => now)
-  const snap = await read($, snapshot)
+  // A closed pane has no countdown to move
+  if (open) await update($, tick, () => now)
+  const snap = l.snapshot
   if (!snap) {
-    if (await isOpen($)) remeasure($)
+    if (open) remeasure($)
     return
   }
-  const at = await read($, lastReply)
+  const at = l.lastReply
   if (at === null || snap.tokens < COLD_FLOOR) return
-  if (now - at < ttlOf(options, snap) || (await read($, warned)).cold) return
-  await update($, warned, w => ({ ...w, cold: true }))
-  await update($, stats, s => ({ ...s, colds: s.colds + 1 }))
+  if (now - at < ttlOf(options, snap) || l.warned.cold) return
+  await patch($, x => ({ warned: { ...x.warned, cold: true }, stats: { ...x.stats, colds: x.stats.colds + 1 } }))
   $.ui.toast(`Prompt cache expired: your next message re-sends ${fmt(snap.tokens)} tokens uncached. A handoff and /clear is cheaper.`, {
     timeoutMs: 10_000,
   })
@@ -349,7 +503,7 @@ const measureOnce = async ($: EngineInterface) => {
 }
 
 export const register: Register = (on, options) => {
-  const quality = typeof options.qualityBudget === 'number' ? options.qualityBudget : 250_000
+  const quality = typeof options.qualityBudget === 'number' && options.qualityBudget >= 0 ? options.qualityBudget : 250_000
   const smartCompact = options.smartCompact !== false
 
   on('session.start', async ($, e, next) => {
@@ -366,13 +520,18 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A conversation that replaced the last one (/clear, /resume) starts the
+  // running figures over and is measured at once, not at its first reply
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear' || e.reason === 'resume') await restart($)
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      await update($, live, () => FRESH)
+      await closePicker($)
+    }
     return next(e)
   })
 
   on('command.run', { command: 'side-context' }, async ($, e) => {
-    const arg = e.args.trim().toLowerCase()
+    const arg = e.args.trim().toLowerCase().replace(/\s+/g, ' ')
 
     // A command holds the turn it runs in and compacting under it is refused,
     // so the compaction starts once the command has answered
@@ -387,7 +546,6 @@ export const register: Register = (on, options) => {
         return { text: `Could not write the handoff: ${reasonOf(err)}` }
       }
     }
-
     if (arg === 'stats') {
       const text = await statsOf($)
       await $.ui.copy({ text }).catch(() => undefined)
@@ -403,9 +561,30 @@ export const register: Register = (on, options) => {
         text:
           gs.length === 0
             ? 'No guards in this project. Press x in the pane to guard the biggest context eater.'
-            : ['Guards in this project:', ...gs.map(g => `- ${g.tool} ${g.label} (~${fmt(g.tokens)})`), '', '/side-context guards clear removes them.'].join('\n'),
+            : [
+                'Guards in this project:',
+                ...gs.map(g => `- ${g.tool} ${g.label} (~${fmt(g.tokens)})${g.hits ? ` · sent back ${g.hits}×` : ''}`),
+                '',
+                'A guard left unused for 30 days is dropped. /side-context guards clear removes them all.',
+              ].join('\n'),
       }
     }
+    if (arg === 'help' || arg === '?') {
+      return {
+        text: [
+          '/side-context            toggle the pane',
+          '/side-context on|off     show or hide it',
+          '/side-context full       show it with an exact count (token-count API)',
+          '/side-context compact    compact, keeping goal, rules, files, decisions, next step',
+          '/side-context handoff    write .claude/side-context/handoff.md for a fresh session',
+          '/side-context stats      a shareable summary of this session (copied)',
+          '/side-context guards     list the guards in this project; "guards clear" removes them',
+        ].join('\n'),
+      }
+    }
+
+    const known = ['', 'on', 'show', 'off', 'hide', 'full']
+    if (!known.includes(arg)) return { text: `Unknown option "${arg}". /side-context help lists them.` }
 
     const open = await isOpen($)
     if (arg === 'off' || arg === 'hide' || (arg === '' && open)) {
@@ -418,48 +597,78 @@ export const register: Register = (on, options) => {
     return { text: 'Context pane shown.' }
   })
 
+  // Observe only: the fill lands now, the breakdown is read in the background
+  // so the engine never waits on it
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('context')) {
       const tokens = e.context.tokens
       if (tokens !== undefined) {
         // The first turn counts from the opening measurement
-        const prev = (await read($, last)) ?? (await read($, snapshot))?.tokens ?? null
-        await update($, delta, () => (prev === null ? 0 : tokens - prev))
-        await update($, last, () => tokens)
-        await update($, history, h => [...h, tokens].slice(-HISTORY))
+        await patch($, l => {
+          const prev = l.last ?? l.snapshot?.tokens ?? null
+          return {
+            delta: prev === null ? 0 : tokens - prev,
+            last: tokens,
+            history: [...l.history, tokens].slice(-HISTORY),
+            snapshot: l.snapshot === null ? null : { ...l.snapshot, tokens, percent: e.context.percent ?? percentOf(tokens, l.snapshot.window) },
+            stats: { ...l.stats, peak: Math.max(l.stats.peak, tokens) },
+          }
+        })
       }
-      // The grid stands for /context, so it keeps /context's own count; the
-      // list is redrawn from the free estimate
-      if (await isOpen($)) await refresh($, (await read($, storage)) ? 'full' : 'summary')
+      if (await isOpen($)) {
+        // The grid stands for /context, so it keeps /context's own count, taken
+        // again now and then; the list is redrawn from the free estimate
+        const l = await read($, live)
+        const now = await $.clock.now()
+        if (!(await read($, storage))) void refresh($, 'summary').catch(() => undefined)
+        else if (l.exactAt === null || now - l.exactAt >= EXACT_EVERY) void refresh($, 'full').catch(() => undefined)
+      }
 
       // One warning on crossing the quality budget, again only after dropping back
-      const snap = await read($, snapshot)
-      if (tokens !== undefined && snap !== null && quality > 0 && quality < (snap.compactAt ?? snap.window)) {
+      const l = await read($, live)
+      const limit = l.snapshot?.compactAt ?? l.snapshot?.window ?? e.context.window
+      if (tokens !== undefined && quality > 0 && quality < limit) {
         const over = tokens >= quality
-        const w = await read($, warned)
-        if (over && !w.quality) {
+        if (over && !l.warned.quality) {
           $.ui.toast(`Context passed ${fmt(quality)}: long conversations start losing early details. Press c in the pane to compact, or w for a handoff.`, {
             timeoutMs: 10_000,
           })
         }
-        if (over !== w.quality) await update($, warned, v => ({ ...v, quality: over }))
+        if (over !== l.warned.quality) await patch($, x => ({ warned: { ...x.warned, quality: over } }))
       }
     }
     if (e.changed.includes('rateLimits') || e.changed.includes('cost')) {
-      await update($, snapshot, s =>
-        s === null ? s : { ...s, limits: e.rateLimits.map(l => ({ kind: l.kind, percent: l.percentUsed, resetsAt: l.resetsAt })), cost: e.cost?.usd ?? s.cost },
-      )
+      await patch($, l => ({
+        snapshot:
+          l.snapshot === null
+            ? null
+            : { ...l.snapshot, limits: e.rateLimits.map(r => ({ kind: r.kind, percent: r.percentUsed, resetsAt: r.resetsAt })), cost: e.cost?.usd ?? l.snapshot.cost },
+      }))
     }
 
     return next(e)
   })
 
+  // Remembers where this session's transcript is, for the resume list
+  on('classic.SessionStart', async ($, e, next) => {
+    const path = (e as { transcript_path?: unknown }).transcript_path
+    if (typeof path === 'string' && path.includes('/')) transcriptDir = path.slice(0, path.lastIndexOf('/'))
+    return next(e)
+  })
+
+  // The first message ends the chance to resume: the button goes, and a list
+  // still open closes
+  on('prompt.submit', async ($, e, next) => {
+    if ((await read($, live)).fresh !== false) await patch($, () => ({ fresh: false }))
+    await closePicker($)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
       const at = await $.clock.now()
-      await update($, lastReply, () => at)
+      await patch($, l => ({ lastReply: at, warned: { ...l.warned, cold: false } }))
       await update($, tick, () => at)
-      await update($, warned, w => ({ ...w, cold: false }))
       if (await isOpen($)) void scan($).catch(() => undefined)
     }
     return next(e)
@@ -473,8 +682,9 @@ export const register: Register = (on, options) => {
     const result = await next({ ...e, instructions })
     // The pane's own compaction counts itself once it has the figures
     if (e.trigger !== 'precompute' && !e.agentId && result.skip === undefined) {
-      if (!isOurs) await update($, stats, s => ({ ...s, compactions: s.compactions + 1 }))
-      remeasure($)
+      if (!isOurs) await patch($, l => ({ stats: { ...l.stats, compactions: l.stats.compactions + 1 } }))
+      await remember($, e.messages, result.messages).catch(() => undefined)
+      await settle($, result.tokensBefore, result.tokensAfter)
     }
     return result
     // A failure here must never stop the compaction itself
@@ -493,283 +703,40 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
-    const snap = await read($, snapshot)
-    const change = await read($, delta)
-    const isExpanded = await read($, expanded)
+    const ui = $.ui.resolve(e)
+    const l = await read($, live)
     const isStorage = await read($, storage)
-    const isCompacting = await read($, compacting)
-    const trend = await read($, history)
-    const eaten = await read($, eaters)
-    const guarded = await read($, guards)
-    const replied = await read($, lastReply)
-    const now = Math.max(await read($, tick), await $.clock.now())
-    const width = Math.max(24, Math.min(MAX_WIDTH, e.props.bodyColumns))
-
-    // Lines truncate rather than wrap, so resizing keeps the pane's height;
-    // only advice wraps, as cutting it loses the point.
-    // Each row is label then number, the number flush with the pane's right
-    // edge; a flag sits just before the number and colours it.
-    const line = (props: { label: string; value?: string; flag?: boolean; mark?: string; markColor?: string; dim?: boolean }) => {
-      const mark = props.mark ?? '  '
-      const value = `${props.flag ? `${flagGlyph} ` : ''}${props.value ?? ''}`
-      const fit = Math.max(1, width - mark.length - value.length - 1)
-      const label = props.label.length > fit ? `${props.label.slice(0, fit - 1)}…` : props.label
-      return (
-        <Box width={width}>
-          <Text color={props.markColor}>{mark}</Text>
-          <Text dimColor={props.dim}>{label.padEnd(fit + 1)}</Text>
-          <Text color={props.flag ? flagColor : undefined} dimColor={props.dim && !props.flag} bold={props.flag}>
-            {value}
-          </Text>
-        </Box>
-      )
+    const data = {
+      live: l,
+      expanded: await read($, expanded),
+      storage: isStorage,
+      compacting: await read($, compacting),
+      guards: await read($, guards),
+      picker: await read($, picker),
+      now: Math.max(await read($, tick), await $.clock.now()),
+      columns: e.props.bodyColumns,
+      quality,
+      ttl: ttlOf(options, l.snapshot),
     }
-    // Advice under a row: the arrow hangs, the text wraps beside it
-    const advice = (text: string) => (
-      <Box width={width} paddingLeft={2}>
-        <Text dimColor>{'↳ '}</Text>
-        <Box width={width - 4}>
-          <Text dimColor wrap="wrap">{text}</Text>
-        </Box>
-      </Box>
-    )
-    const hint = (props: { text: string }) => (
-      <Box width={width} paddingLeft={2}>
-        <Text dimColor wrap="truncate-end">{props.text}</Text>
-      </Box>
-    )
-
-    // An estimate counts some rows well above what /context finds (tool schemas
-    // most), so only the exact count may say a row is too large; an estimate
-    // can only raise the question
-    const isExact = snap?.detail === 'full'
-    const flagGlyph = isExact ? '*' : '?'
-    const flagColor = isExact ? 'error' : 'warning'
-
-    if (!snap) {
-      void measureOnce($).catch(() => undefined)
-      return (
-        <Box flexDirection="column" width={width}>
-          <Text bold>{TITLE}</Text>
-          <Text dimColor>Measuring…</Text>
-        </Box>
-      )
-    }
-
-    // Pressure is measured against the budget, not the raw window
-    const budget = budgetOf(snap, quality)
-    const isQualityFirst = budget < (snap.compactAt ?? snap.window)
-    const pressure = budget > 0 ? snap.tokens / budget : 0
-    const status = isCompacting
-      ? { color: 'claude', text: '◌ Compacting' }
-      : pressure >= 0.8
-        ? { color: 'error', text: isQualityFirst ? '● Time to compact' : '● Near compact' }
-        : pressure >= 0.5
-          ? { color: 'warning', text: '● Filling' }
-          : { color: 'success', text: '● Healthy' }
-
-    const inWindow = snap.rows.filter(r => r.kind !== 'deferred')
-    const deferred = snap.rows.filter(r => r.kind === 'deferred')
-    const flagged = inWindow.filter(r => isHeavy(r, snap, quality))
-    const total = inWindow.reduce((sum, r) => sum + r.tokens, 0) || snap.window
-
-    // One bar, each category a run of cells in /context's own colours
-    let used = 0
-    const segments = inWindow.map(r => {
-      const cells = Math.round(((used + r.tokens) / total) * width) - Math.round((used / total) * width)
-      used += r.tokens
-      return { ...r, cells }
-    })
-
-    // How far it may still grow, and where the trend has been
-    const room =
-      snap.compactAt === undefined
-        ? 'auto-compact off'
-        : isQualityFirst
-          ? `${fmt(Math.max(0, budget - snap.tokens))} to quality limit`
-          : `${fmt(Math.max(0, snap.compactAt - snap.tokens))} to auto-compact`
-    const spark = trend.length >= 1 ? `${sparkline(trend, Math.max(budget, ...trend), Math.max(6, width - room.length - 2))}  ` : ''
-
-    // Every message sends the whole conversation again: cheap while the prompt
-    // cache holds it, paid in full once it lapses
-    const left = replied === null ? 0 : replied + ttlOf(options, snap) - now
-    const isCold = replied !== null && left <= 0
-    const meter = [
-      ...(replied === null ? [] : [isCold ? 'cache cold' : `cache ${Math.max(1, Math.ceil(left / 60_000))}m`]),
-      ...snap.limits.map(l => `${limitName(l.kind)} ${Math.round(l.percent)}%`),
-      ...(snap.cost !== undefined && snap.cost >= 0.01 ? [`$${snap.cost.toFixed(2)}`] : []),
-    ]
-
-    const list = (title: string, items: Item[], limit: number) => (
-      <Box flexDirection="column" marginTop={1}>
-        <Text bold>{title}</Text>
-        {items.length === 0 ? hint({ text: 'none' }) : items.map(i => line({ label: i.name, value: fmt(i.tokens), flag: i.tokens > limit, dim: true }))}
-      </Box>
-    )
-
-    // /context's grid and the rows beside it, stacked: the pane is too narrow
-    // to hold them side by side
-    const storageView = () => {
-      const cols = snap.grid[0]?.length ?? 0
-      const gap = width >= cols * 2 ? ' ' : ''
-      return (
-        <Box flexDirection="column" marginTop={1}>
-          <Box width={width}>
-            <Text wrap="truncate-end">
-              <Text bold>Context Usage</Text>
-              <Text dimColor>{snap.model ? `  ${snap.model}` : ''}</Text>
-            </Text>
-          </Box>
-          <Box width={width}>
-            <Text dimColor wrap="truncate-end">
-              {`${fmt(snap.counted)}/${fmt(snap.measuredAgainst)} tokens (${Math.round((snap.counted / (snap.measuredAgainst || 1)) * 100)}%)`}
-            </Text>
-          </Box>
-          {snap.grid.length === 0 ? (
-            hint({ text: 'No grid yet' })
-          ) : (
-            <Box flexDirection="column" marginTop={1}>
-              {snap.grid.map(row => (
-                <Text>
-                  {row.map(sq => (
-                    <Text color={sq.color}>{`${sq.glyph}${gap}`}</Text>
-                  ))}
-                </Text>
-              ))}
-            </Box>
-          )}
-          <Box flexDirection="column" marginTop={1}>
-            <Text dimColor>Estimated usage by category</Text>
-            {snap.legend.map(l => (
-              <Box width={width}>
-                <Text wrap="truncate-end">
-                  <Text color={l.color}>{`${l.glyph} `}</Text>
-                  <Text>{`${l.name}: `}</Text>
-                  <Text dimColor>{`${fmt(l.tokens)}${/^free/i.test(l.name) ? '' : ' tokens'} (${l.percent.toFixed(1)}%)`}</Text>
-                </Text>
-              </Box>
-            ))}
-          </Box>
-        </Box>
-      )
-    }
-
-    const inUse = inWindow.filter(r => r.kind === 'used')
-    const canGuard = !isStorage && nextGuard(eaten, guarded) !== undefined
-    const time = new Date(snap.at).toTimeString().slice(0, 5)
-    const footer = isExact ? `Exact count · ${time}` : flagged.length > 0 ? `Estimate · ? may be large, r to check · ${time}` : `Estimate · ${time}`
-
-    return (
-      <Box flexDirection="column" width={width}>
-        <Box width={width} justifyContent="space-between">
-          <Text>
-            <Text bold color={status.color}>{status.text}</Text>
-            <Text bold>{`  ${fmt(snap.tokens)}`}</Text>
-            <Text dimColor>{` / ${fmt(snap.window)}`}</Text>
-          </Text>
-          <Text color={change > 0 ? 'warning' : 'success'}>{change === 0 ? '' : `${change > 0 ? '+' : '−'}${fmt(Math.abs(change))}`}</Text>
-        </Box>
-        {!isStorage && (
-          <Text>
-            {segments.map(s =>
-              s.cells > 0 ? (
-                <Text color={s.kind === 'free' ? 'subtle' : s.color}>
-                  {(s.kind === 'free' ? '░' : s.kind === 'buffer' ? '▒' : '█').repeat(s.cells)}
-                </Text>
-              ) : null,
-            )}
-          </Text>
-        )}
-        <Box width={width}>
-          <Text wrap="truncate-end">
-            <Text color="claude">{spark}</Text>
-            <Text dimColor>{room}</Text>
-          </Text>
-        </Box>
-        {meter.length > 0 && (
-          <Box width={width}>
-            <Text wrap="truncate-end">
-              {meter.map((m, i) => (
-                <Text color={m === 'cache cold' ? 'warning' : undefined} dimColor={m !== 'cache cold'}>
-                  {`${i > 0 ? ' · ' : ''}${m}`}
-                </Text>
-              ))}
-            </Text>
-          </Box>
-        )}
-
-        {/* What is in the window; free space and the reserve are the bar's pale end */}
-        {!isStorage && (
-          <Box flexDirection="column" marginTop={1}>
-            {inUse.map(r => {
-              const heavy = isHeavy(r, snap, quality)
-              return (
-                <Box flexDirection="column">
-                  {line({ mark: '■ ', markColor: r.color, label: labelOf(r.name), value: fmt(r.tokens), flag: heavy })}
-                  {heavy && advice(ruleOf(r.name)?.fix ?? 'Bigger than usual')}
-                </Box>
-              )
-            })}
-          </Box>
-        )}
-
-        {isStorage && storageView()}
-
-        {!isStorage && eaten.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
-            <Text bold>Top context eaters</Text>
-            {eaten.map(t => {
-              const g = guardOf(t)
-              const isGuarded = g !== undefined && guarded.some(x => x.tool === g.tool && x.key === g.key)
-              return line({
-                mark: isGuarded ? '⊘ ' : '  ',
-                markColor: 'success',
-                label: `${toolLabel(t.tool)} ${t.target}${t.count > 1 ? ` ×${t.count}` : ''}`,
-                value: `~${fmt(t.tokens)}`,
-                dim: true,
-              })
-            })}
-            {eaten[0] && advice(tipOf(eaten[0].tool))}
-          </Box>
-        )}
-
-        {!isStorage && isExpanded && deferred.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
-            <Text bold>Loaded on demand (not in context)</Text>
-            {deferred.map(r => line({ label: labelOf(r.name), value: fmt(r.tokens), dim: true }))}
-          </Box>
-        )}
-        {!isStorage && isExpanded && list('Memory files', snap.memory, ITEM_LIMIT.memory)}
-        {!isStorage && isExpanded && list('Loaded MCP tools', snap.mcp, ITEM_LIMIT.mcp)}
-        {!isStorage && isExpanded && list('Largest skills', snap.skills, ITEM_LIMIT.skills)}
-
-        <Box marginTop={1} width={width} gap={1} flexWrap="wrap">
-          <Button key="compact" hotkey="c" label={`${isCompacting ? 'compacting…' : 'compact'} [c]`} onPress={() => void compact($)} />
-          <Button key="handoff" hotkey="w" label="handoff [w]" onPress={() => void handoffPressed($)} />
-          {canGuard && <Button key="guard" hotkey="x" label="guard [x]" onPress={() => void guardPressed($).catch(() => undefined)} />}
-          <Button key="details" hotkey="e" label={`${isExpanded ? 'less' : 'more'} [e]`} onPress={() => void update($, expanded, v => !v)} />
-          {/* The finer tools wait behind "more", so the everyday row stays short */}
-          {(isExpanded || isStorage) && (
-            <Button
-              key="storage"
-              hotkey="s"
-              label={`${isStorage ? 'list' : 'grid'} [s]`}
-              onPress={() => {
-                void update($, storage, v => !v)
-                // The grid is /context's, so it is drawn from /context's own count
-                if (!isStorage) void refresh($, 'full').catch(() => undefined)
-              }}
-            />
-          )}
-          {(isExpanded || flagged.length > 0) && (
-            <Button key="exact" hotkey="r" label="exact [r]" onPress={() => void refresh($, 'full').catch(() => undefined)} />
-          )}
-        </Box>
-        <Box width={width}>
-          <Text dimColor wrap="truncate-end">{footer}</Text>
-        </Box>
-      </Box>
+    // Started once every read is in, so the figures it writes redraw the pane
+    if (!l.snapshot) void measureOnce($).catch(() => undefined)
+    return drawPane(
+      ui,
+      data,
+      {
+        compact: () => void compact($),
+        handoff: () => void handoffPressed($),
+        guard: () => void guardPressed($).catch(() => undefined),
+        toggleExpanded: () => void update($, expanded, v => !v),
+        toggleStorage: () => {
+          void update($, storage, v => !v)
+          // The grid is /context's, so it is drawn from /context's own count
+          if (!isStorage) void refresh($, 'full').catch(() => undefined)
+        },
+        exact: () => void refresh($, 'full').catch(() => undefined),
+        resume: () => void resumePressed($).catch(() => undefined),
+        pick: (id: string) => void pick($, id),
+      },
     )
   })
 }

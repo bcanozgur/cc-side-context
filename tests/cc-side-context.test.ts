@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On, SessionMessage, SessionUsage, UiPane } from 'claude-code'
 import type { TestBody } from 'claude-code/testing'
 
-import { commandOf } from '../hooks/analysis'
+import { EaterIndex, GUARD_TTL, agoOf, bashKey, commandOf, eatersOf, estimate, fitWidth, projectSlug, titleOf, widthOf } from '../hooks/analysis'
 
 const PANE = 'side-context'
 const START = { cwd: '/tmp', surface: 'terminal', isInteractive: true } as const
@@ -65,17 +65,22 @@ const transcript: SessionMessage[] = [
 ]
 
 // The engine beneath the plugin: a pane list it keeps, and the usage above
-const engine = (on: On, current: SessionUsage = usage) => {
+const engine = (on: On, current: SessionUsage = usage, messages: () => SessionMessage[] = () => transcript) => {
   const panes: UiPane[] = []
   const toasts: string[] = []
+  const breakdowns: (string | undefined)[] = []
   const clock = mock.clock(on, { now: 1_000_000 })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.cwd', () => ({ value: START.cwd }))
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('turn.complete', (_$, e) => ({ text: e.answer, usage: e.usage }))
   on('command.register', () => ({ value: { command: 'side-context' } }))
-  on('session.usage', () => ({ value: current }))
-  on('session.messages', () => ({ value: transcript }))
+  on('session.usage', (_$, e) => {
+    breakdowns.push((e as { breakdown?: string } | undefined)?.breakdown)
+    return { value: current }
+  })
+  on('session.messages', () => ({ value: messages() }))
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -92,7 +97,7 @@ const engine = (on: On, current: SessionUsage = usage) => {
     if (i >= 0) panes.splice(i, 1)
     return { value: undefined }
   })
-  return { panes, toasts, clock }
+  return { panes, toasts, clock, breakdowns }
 }
 
 const run = (args: string) => ({
@@ -335,6 +340,29 @@ test('a 1M window warns at the quality budget, long before auto-compact', async 
   expect(JSON.stringify(await (await mount($)).drawn())).toContain('cache 60m')
 })
 
+test('a /compact from the chat redraws the pane without waiting for a reply', async ($, on) => {
+  const current: SessionUsage = { ...big, context: { ...big.context } }
+  const { clock } = engine(on, current)
+  on('session.compact', () => ({ messages: [{ role: 'user' as const, text: 'Summary', toolUses: [] }], tokensBefore: 300_000, tokensAfter: 30_000 }))
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  await $.session.measure({ context: { ...big.context, breakdown: undefined }, rateLimits: big.rateLimits, cost: big.cost, changed: ['context'] })
+  const pane = await mount($)
+  expect(JSON.stringify(await pane.drawn())).toContain('Time to compact')
+
+  // core still reports the old fill while the hook chain runs
+  await $.session.compact({ trigger: 'manual', messages: transcript })
+  let drawn = JSON.stringify(await pane.drawn())
+  expect(drawn).not.toContain('Time to compact')
+  expect(drawn).toContain('220.0k to quality limit')
+
+  // once installed, the fill is unreported until the next response
+  current.context = { ...big.context, tokens: undefined, percent: undefined }
+  await clock.advance(600)
+  drawn = JSON.stringify(await pane.drawn())
+  expect(drawn).not.toContain('Time to compact')
+})
+
 test('the pane presses compact and shows it running', async ($, on) => {
   const { toasts, clock } = engine(on)
   let release = () => {}
@@ -424,4 +452,283 @@ test('/side-context stats sums up the session and copies it', async ($, on) => {
   expect(text).toContain('Read src/big.ts ×2')
   expect(text).toContain('the top 2 took 100%')
   expect(copied[0]).toContain('Session stats')
+})
+
+test('after a compaction the handoff keeps the first request as the goal, not the summary', async ($, on) => {
+  let messages = transcript
+  const { clock } = engine(on, usage, () => messages)
+  mock.store(on)
+  on('session.id', () => ({ value: 'session-1' }))
+  const summary = 'This session is being continued from a previous conversation. Summary: retries were added.'
+  on('session.compact', () => ({ messages: [{ role: 'user' as const, text: summary, toolUses: [] }], tokensBefore: 90_000, tokensAfter: 9_000 }))
+  const written: { path: string; text: string }[] = []
+  on('fs.write', (_$, e) => {
+    written.push(e)
+    return { value: undefined }
+  })
+  await $.session.start(START)
+  await $.command.run(run('compact'))
+  await clock.advance(300)
+
+  messages = [
+    { role: 'user', text: summary, toolUses: [] },
+    { role: 'user', text: 'Now add jitter to the backoff', toolUses: [] },
+    { role: 'assistant', text: 'Jitter is in.', toolUses: [] },
+  ]
+  await $.command.run(run('handoff'))
+  const note = written.find(w => w.path.endsWith('handoff.md'))?.text ?? ''
+  expect(note).toContain('## Goal\n\nAdd retries to the fetch client')
+  expect(note).toContain('- Now add jitter to the backoff')
+  expect(note).not.toContain('Summary: retries were added')
+
+  const { text } = await $.command.run(run('stats'))
+  expect(text).toContain('Turns        1 since the last compaction')
+})
+
+test('a resumed session still knows the goal from before its compaction', async ($, on) => {
+  engine(on, usage, () => [
+    { role: 'user', text: 'Summary of the earlier work', toolUses: [] },
+    { role: 'user', text: 'Ship it', toolUses: [] },
+  ])
+  mock.store(on, { 'memo:session-1': { goal: 'Port the CLI to Rust', summaries: ['Summary of the earlier work'] } })
+  on('session.id', () => ({ value: 'session-1' }))
+  const written: { path: string; text: string }[] = []
+  on('fs.write', (_$, e) => {
+    written.push(e)
+    return { value: undefined }
+  })
+  await $.session.start(START)
+  await $.command.run(run('handoff'))
+  const note = written.find(w => w.path.endsWith('handoff.md'))?.text ?? ''
+  expect(note).toContain('## Goal\n\nPort the CLI to Rust')
+  expect(note).toContain('- Ship it')
+  expect(note).not.toContain('Summary of the earlier work')
+})
+
+test('the handoff keeps itself out of git and keeps the note before it', async ($, on) => {
+  engine(on)
+  const written: { path: string; text: string }[] = []
+  on('fs.write', (_$, e) => {
+    written.push(e)
+    return { value: undefined }
+  })
+  on('fs.read', () => ({ value: '# Handoff · earlier' }) as never)
+  on('fs.exists', () => ({ value: false }))
+  await $.session.start(START)
+  await $.command.run(run('handoff'))
+  const paths = written.map(w => w.path)
+  expect(paths.some(p => p.endsWith('.claude/side-context/handoff.md'))).toBe(true)
+  expect(written.find(w => w.path.endsWith('handoff.prev.md'))?.text).toBe('# Handoff · earlier')
+  expect(written.find(w => w.path.endsWith('.claude/side-context/.gitignore'))?.text).toContain('*')
+})
+
+const NOW = 1_000_000
+const stored = (guards: object[]) => ({ 'guards:/tmp': guards })
+
+test('guards send each call back once, parallel calls and a reworded command alike', async ($, on) => {
+  engine(on)
+  mock.store(
+    on,
+    stored([
+      { tool: 'Read', key: '/repo/a.ts', label: 'a.ts', tokens: 9_000, at: NOW },
+      { tool: 'Read', key: '/repo/b.ts', label: 'b.ts', tokens: 9_000, at: NOW },
+      { tool: 'Bash', key: 'npm test', label: 'npm test', tokens: 5_000, at: NOW },
+    ]),
+  )
+  const ran: string[] = []
+  on('tool.call', (_$, e) => {
+    ran.push(`${e.tool} ${JSON.stringify(e)}`)
+    return { result: { text: 'ok' } } as never
+  })
+  await $.session.start(START)
+  const isDenied = (r: unknown) => JSON.stringify(r).includes('cc-side-context guard')
+
+  // two whole reads in one turn are each sent back, and each goes through when asked again
+  expect(isDenied(await $.tool.call({ tool: 'Read', file_path: '/repo/a.ts' } as never))).toBe(true)
+  expect(isDenied(await $.tool.call({ tool: 'Read', file_path: '/repo/b.ts' } as never))).toBe(true)
+  expect(isDenied(await $.tool.call({ tool: 'Read', file_path: '/repo/a.ts' } as never))).toBe(false)
+  expect(isDenied(await $.tool.call({ tool: 'Read', file_path: '/repo/b.ts' } as never))).toBe(false)
+
+  // the cd in front and the spacing do not hide a guarded command; a trimmed one goes through
+  expect(isDenied(await $.tool.call({ tool: 'Bash', command: 'cd /repo &&  npm test' } as never))).toBe(true)
+  expect(isDenied(await $.tool.call({ tool: 'Bash', command: 'npm test 2>&1 | tail -20' } as never))).toBe(false)
+  expect(isDenied(await $.tool.call({ tool: 'Bash', command: 'npm test' } as never))).toBe(false)
+  expect(ran.length).toBe(4)
+
+  expect((await $.command.run(run('guards'))).text).toContain('sent back 1×')
+})
+
+test('a guard left unused for 30 days is dropped', async ($, on) => {
+  engine(on)
+  mock.store(
+    on,
+    stored([
+      { tool: 'Read', key: '/repo/old.ts', label: 'old.ts', tokens: 9_000, at: NOW - GUARD_TTL - 1 },
+      { tool: 'Read', key: '/repo/new.ts', label: 'new.ts', tokens: 9_000, at: NOW - GUARD_TTL - 1, lastHit: NOW - 1_000 },
+    ]),
+  )
+  await $.session.start(START)
+  const { text } = await $.command.run(run('guards'))
+  expect(text).not.toContain('old.ts')
+  expect(text).toContain('new.ts')
+})
+
+test('the grid view recounts exactly at most once a minute', async ($, on) => {
+  const { clock, breakdowns } = engine(on)
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  const pane = await mount($)
+  await pane.press({ key: 'details' })
+  await pane.press({ key: 'storage' })
+  await clock.settle()
+  const exact = () => breakdowns.filter(b => b === 'full').length
+  const before = exact()
+  const measure = () => $.session.measure({ context: { ...usage.context, breakdown: undefined }, rateLimits: [], changed: ['context'] })
+  await measure()
+  await measure()
+  await clock.settle()
+  expect(exact()).toBe(before)
+  await clock.advance(61_000)
+  await measure()
+  await clock.settle()
+  expect(exact()).toBe(before + 1)
+})
+
+test('an unknown option says so instead of toggling the pane', async ($, on) => {
+  const { panes } = engine(on)
+  await $.session.start(START)
+  expect((await $.command.run(run('compcat'))).text).toContain('Unknown option')
+  expect(panes.map(p => p.id)).toEqual([PANE])
+  expect((await $.command.run(run('help'))).text).toContain('/side-context handoff')
+})
+
+test('sizes and widths count non-English text and wide characters', async () => {
+  expect(estimate('x'.repeat(400))).toBe(100)
+  expect(estimate('ğ'.repeat(100))).toBe(50)
+  expect(estimate('漢'.repeat(10))).toBe(10)
+  expect(widthOf('漢字ab')).toBe(6)
+  expect(widthOf('é')).toBe(1)
+  expect(fitWidth('漢字漢字', 5)).toBe('漢字…')
+  expect(widthOf(fitWidth('漢字漢字', 5))).toBe(5)
+  expect(fitWidth('short', 10)).toBe('short')
+  expect(bashKey('cd /repo && FOO=1 rtk npm   test')).toBe('npm test')
+  expect(bashKey('ls -la')).toBe('ls -la')
+})
+
+test('the eater index folds in only new messages, and starts over when the transcript is replaced', async () => {
+  const index = new EaterIndex()
+  index.update(transcript, '/repo')
+  const more: SessionMessage[] = [
+    ...transcript,
+    { role: 'user', text: 'and the docs', toolUses: [] },
+    { role: 'assistant', text: '', toolUses: [{ tool_use_id: 't9', tool: 'Read', input: { file_path: '/repo/src/big.ts' }, text: 'x'.repeat(40_000) }] },
+    { role: 'assistant', text: 'Done.', toolUses: [] },
+  ]
+  expect(index.update(more, '/repo').top()).toEqual(eatersOf(more, 5, '/repo'))
+  expect(index.top()[0]?.count).toBe(3)
+
+  const compacted: SessionMessage[] = [{ role: 'user', text: 'Summary', toolUses: [] }, ...more.slice(-2)]
+  expect(index.update(compacted, '/repo').top()).toEqual(eatersOf(compacted, 5, '/repo'))
+  expect(index.top()[0]?.count).toBe(1)
+})
+
+const line = (v: object) => JSON.stringify(v)
+const PROJECT = `/home/me/.claude/projects/${projectSlug(START.cwd)}`
+const past: Record<string, { text: string; mtimeMs: number }> = {
+  'login.jsonl': {
+    mtimeMs: NOW - 3 * 60 * 60_000,
+    text: [
+      line({ type: 'mode', mode: 'normal' }),
+      line({ type: 'user', message: { role: 'user', content: 'Fix the login bug' } }),
+      line({ type: 'ai-title', aiTitle: 'Login bug fix' }),
+    ].join('\n'),
+  },
+  'dark.jsonl': {
+    mtimeMs: NOW - 2 * 24 * 60 * 60_000,
+    text: line({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '<command-name>/x</command-name>Add dark mode' }] } }),
+  },
+  'empty.jsonl': { mtimeMs: NOW - 60_000, text: line({ type: 'mode', mode: 'normal' }) },
+  'current.jsonl': { mtimeMs: NOW, text: line({ type: 'user', message: { role: 'user', content: 'this one' } }) },
+}
+
+// A fresh session in a project with past transcripts
+const freshSession = (on: On) => {
+  const { clock } = engine(on, usage, () => [])
+  mock.env(on, { HOME: '/home/me' })
+  on('session.id', () => ({ value: 'current' }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.list', () => ({
+    value: Object.entries(past).map(([name, f]) => ({ name, kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink: false })),
+  }))
+  on('fs.read', (_$, e) => ({ value: past[(e as { path: string }).path.split('/').pop() ?? '']?.text ?? '' }) as never)
+  const resumed: string[] = []
+  on('command.run', { command: 'resume' }, (_$, e) => {
+    resumed.push(e.args)
+    return { text: '' }
+  })
+  return { clock, resumed }
+}
+
+test('a fresh session offers its project\'s past sessions, and a number resumes one', async ($, on) => {
+  const { clock, resumed } = freshSession(on)
+  await $.session.start(START)
+  const pane = await mount($)
+  await clock.settle()
+  expect(JSON.stringify(await pane.drawn())).toContain('resume [p]')
+
+  await pane.press({ key: 'resume' })
+  await clock.settle()
+  const list = JSON.stringify(await pane.drawn())
+  expect(list).toContain('Resume a session')
+  expect(list).toContain('1 Login bug fix')
+  expect(list).toContain('3h ago')
+  expect(list).toContain('2 Add dark mode')
+  expect(list).toContain('2d ago')
+  // nobody typed in it, or it is this very session
+  expect(list).not.toContain('this one')
+  expect(list).not.toContain('3 ')
+
+  await pane.press({ key: 'resume-1' })
+  await clock.settle()
+  expect(resumed).toEqual(['login'])
+  expect(JSON.stringify(await pane.drawn())).not.toContain('Resume a session')
+})
+
+test('once the conversation starts, resume is gone', async ($, on) => {
+  const { clock } = freshSession(on)
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
+  await $.session.start(START)
+  const pane = await mount($)
+  await clock.settle()
+  await pane.press({ key: 'resume' })
+  await clock.settle()
+  expect(JSON.stringify(await pane.drawn())).toContain('Resume a session')
+
+  await $.prompt.submit({ text: 'Hello', wait: false, origin: { kind: 'user' } } as never)
+  await clock.settle()
+  const drawn = JSON.stringify(await pane.drawn())
+  expect(drawn).not.toContain('Resume a session')
+  expect(drawn).not.toContain('resume [p]')
+})
+
+test('a session already under way does not offer resume', async ($, on) => {
+  const { clock } = engine(on)
+  await $.session.start(START)
+  const pane = await mount($)
+  await clock.settle()
+  expect(JSON.stringify(await pane.drawn())).not.toContain('resume [p]')
+})
+
+test('a past session is named by /rename, then by Claude, then by its first prompt', async () => {
+  const user = line({ type: 'user', message: { role: 'user', content: 'Refactor the parser' } })
+  const ai = line({ type: 'ai-title', aiTitle: 'Parser refactor' })
+  const custom = line({ type: 'custom-title', customTitle: 'parser-v2' })
+  expect(titleOf(user, `${ai}\n${custom}`)).toBe('parser-v2')
+  expect(titleOf(user, ai)).toBe('Parser refactor')
+  expect(titleOf(`{"type":"user","message":{"cut`, '')).toBeUndefined()
+  expect(titleOf(`${line({ type: 'user', isMeta: true, message: { content: 'meta' } })}\n${user}`, '')).toBe('Refactor the parser')
+  expect(titleOf(line({ type: 'mode' }), '')).toBeUndefined()
+  expect(projectSlug('/Users/me/my_app.v2')).toBe('-Users-me-my-app-v2')
+  expect(agoOf(30_000)).toBe('just now')
+  expect(agoOf(5 * 60_000)).toBe('5m ago')
 })

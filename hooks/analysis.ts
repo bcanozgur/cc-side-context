@@ -1,12 +1,69 @@
 import type { SessionMessage, ToolUseSummary } from 'claude-code'
 
-import type { Eater, Guard } from '../types'
+import type { Eater, Guard, Memo } from '../types'
 
 // What the pane reads out of the transcript: no API calls, so every figure
 // here is an estimate from text length
 
-// Roughly four characters a token for English and code
-export const estimate = (text: string): number => Math.ceil(text.length / 4)
+// Roughly four characters a token for English and code, two for accented
+// and non-Latin letters (Turkish, Cyrillic, Greek), one for CJK and emoji
+export const estimate = (text: string): number => {
+  let ascii = 0
+  let other = 0
+  let wide = 0
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i)
+    if (c < 0x80) ascii++
+    else if (c >= 0xd800 && c <= 0xdbff) {
+      wide++
+      i++
+    } else if (c >= 0x2e80) wide++
+    else other++
+  }
+  return Math.ceil(ascii / 4 + other / 2 + wide)
+}
+
+// Columns a string takes in a terminal: CJK and emoji take two, combining
+// marks and joiners none
+const isZeroWidth = (cp: number) =>
+  (cp >= 0x300 && cp <= 0x36f) || (cp >= 0x200b && cp <= 0x200f) || (cp >= 0xfe00 && cp <= 0xfe0f) || (cp >= 0x1f3fb && cp <= 0x1f3ff)
+const isWide = (cp: number) =>
+  (cp >= 0x1100 && cp <= 0x115f) ||
+  (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f) ||
+  (cp >= 0xac00 && cp <= 0xd7a3) ||
+  (cp >= 0xf900 && cp <= 0xfaff) ||
+  (cp >= 0xfe30 && cp <= 0xfe4f) ||
+  (cp >= 0xff00 && cp <= 0xff60) ||
+  (cp >= 0xffe0 && cp <= 0xffe6) ||
+  (cp >= 0x1f300 && cp <= 0x1f64f) ||
+  (cp >= 0x1f900 && cp <= 0x1f9ff) ||
+  (cp >= 0x20000 && cp <= 0x3fffd)
+const columnsOf = (ch: string) => {
+  const cp = ch.codePointAt(0) ?? 0
+  return isZeroWidth(cp) ? 0 : isWide(cp) ? 2 : 1
+}
+
+export const widthOf = (s: string): number => {
+  let w = 0
+  for (const ch of s) w += columnsOf(ch)
+  return w
+}
+
+// Cut to `n` columns with an ellipsis, never through a wide character
+export const fitWidth = (s: string, n: number): string => {
+  if (widthOf(s) <= n) return s
+  let out = ''
+  let w = 0
+  for (const ch of s) {
+    const cw = columnsOf(ch)
+    if (w + cw > n - 1) break
+    out += ch
+    w += cw
+  }
+  return `${out}…`
+}
+
+export const padWidth = (s: string, n: number): string => s + ' '.repeat(Math.max(0, n - widthOf(s)))
 
 // 1234 -> 1.2k, 1234567 -> 1.2M
 export const fmt = (n: number): string => {
@@ -68,6 +125,21 @@ export const commandOf = (command: string, cwd = ''): string => {
   return clip(args[0] ? `${name} ${args[0]}` : name, 40)
 }
 
+// The command a guard matches on: the cd, export and env in front dropped
+// and the spacing evened, so `cd /repo && npm test` and `npm  test` are one
+export const bashKey = (command: string): string => {
+  const words = command.replace(/\s+/g, ' ').trim().match(WORDS) ?? []
+  let i = 0
+  for (;;) {
+    while (i < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[i] ?? '') || WRAPPERS.has(words[i] ?? ''))) i++
+    if (i >= words.length || !PRELUDE.has(words[i] ?? '')) break
+    while (i < words.length && !OPERATOR.test(words[i] ?? '')) i++
+    i++
+  }
+  const rest = words.slice(i)
+  return rest.length > 0 ? rest.join(' ') : command.replace(/\s+/g, ' ').trim()
+}
+
 // mcp__github__get_issue -> github › get_issue
 export const toolLabel = (tool: string): string => {
   const m = /^mcp__(.+?)__(.+)$/.exec(tool)
@@ -126,39 +198,107 @@ export const tipOf = (tool: string): string => {
   }
 }
 
-// What a guard matches on: the file a Read took whole, the exact command a Bash ran
+// What a guard matches on: the file a Read took whole, the command a Bash ran
 const rawOf = (use: Pick<ToolUseSummary, 'tool' | 'input'>): string =>
-  use.tool === 'Read' ? str(use.input.file_path) : use.tool === 'Bash' ? str(use.input.command).replace(/\s+/g, ' ').trim() : ''
+  use.tool === 'Read' ? str(use.input.file_path) : use.tool === 'Bash' ? bashKey(str(use.input.command)) : ''
+
+// One row's name: the tool, what it worked on, and how often
+export const eaterLabel = (e: Pick<Eater, 'tool' | 'target' | 'count'>): string => `${toolLabel(e.tool)} ${e.target}${e.count > 1 ? ` ×${e.count}` : ''}`
 
 // Calls under this size are not worth a row
 const EATER_FLOOR = 500
 
-// The tool results that take the most room, the same call on the same target
-// counted together (a file read three times is one row)
-export const eatersOf = (messages: readonly SessionMessage[], limit = 5, cwd = ''): Eater[] => {
-  const byKey = new Map<string, Eater>()
-  for (const m of messages) {
-    if (m.role !== 'assistant') continue
-    for (const use of m.toolUses) {
-      if (!use.text) continue
-      const target = targetOf(use, cwd)
-      const key = `${use.tool}\u0000${target}`
-      const tokens = estimate(use.text)
-      const seen = byKey.get(key)
-      if (seen) {
-        seen.tokens += tokens
-        seen.count += 1
-      } else {
-        const raw = rawOf(use)
-        byKey.set(key, { tool: use.tool, target, tokens, count: 1, ...(raw ? { raw } : {}) })
-      }
+const fold = (into: Map<string, Eater>, m: SessionMessage, cwd: string, shared: ReadonlyMap<string, Eater> = new Map()) => {
+  if (m.role !== 'assistant') return
+  for (const use of m.toolUses) {
+    if (!use.text) continue
+    const target = targetOf(use, cwd)
+    const key = `${use.tool}\u0000${target}`
+    const tokens = estimate(use.text)
+    const seen = into.get(key) ?? shared.get(key)
+    if (seen) into.set(key, { ...seen, tokens: seen.tokens + tokens, count: seen.count + 1 })
+    else {
+      const raw = rawOf(use)
+      into.set(key, { tool: use.tool, target, tokens, count: 1, ...(raw ? { raw } : {}) })
     }
   }
-  return [...byKey.values()]
-    .filter(e => e.tokens >= EATER_FLOOR)
-    .sort((a, b) => b.tokens - a.tokens)
-    .slice(0, limit)
 }
+
+// Everything a message puts in the window, roughly: its text, its calls and
+// their results (a result is counted on its call, not again on the reply)
+const sizeOf = (m: SessionMessage): number =>
+  estimate(m.text) + m.toolUses.reduce((sum, u) => sum + estimate(JSON.stringify(u.input) ?? '') + (u.text ? estimate(u.text) : 0), 0)
+
+const signatureOf = (m: SessionMessage | undefined): string =>
+  m ? `${m.role}:${m.text.length}:${m.toolUses.map(u => `${u.tool_use_id}:${u.text?.length ?? -1}`).join(',')}` : ''
+
+// The newest messages are counted again each time: a call's result can land
+// after the call itself
+const TAIL = 2
+
+// The eaters kept from one scan to the next, so a long session folds in only
+// what is new. A transcript that changed underneath (a compaction, /clear,
+// /resume) is folded again from the start.
+export class EaterIndex {
+  private folded = new Map<string, Eater>()
+  private done = 0
+  private head = ''
+  private last = ''
+  private cwd = ''
+  private size = 0
+  private tailSize = 0
+  private tail = new Map<string, Eater>()
+
+  update(messages: readonly SessionMessage[], cwd = ''): this {
+    const stable = Math.max(0, messages.length - TAIL)
+    const isSame =
+      cwd === this.cwd && this.done <= stable && signatureOf(messages[0]) === this.head && (this.done === 0 || signatureOf(messages[this.done - 1]) === this.last)
+    if (!isSame) {
+      this.folded = new Map()
+      this.done = 0
+      this.size = 0
+      this.cwd = cwd
+      this.head = signatureOf(messages[0])
+    }
+    for (let i = this.done; i < stable; i++) {
+      const m = messages[i]
+      if (!m) continue
+      fold(this.folded, m, cwd)
+      this.size += sizeOf(m)
+    }
+    this.done = stable
+    this.last = signatureOf(messages[stable - 1])
+    this.tail = new Map()
+    this.tailSize = 0
+    for (const m of messages.slice(stable)) {
+      fold(this.tail, m, cwd, this.folded)
+      this.tailSize += sizeOf(m)
+    }
+    return this
+  }
+
+  // The rough size of the whole conversation, for calibrating against an exact count
+  get total(): number {
+    return this.size + this.tailSize
+  }
+
+  all(): Eater[] {
+    const merged = new Map(this.folded)
+    for (const [k, v] of this.tail) merged.set(k, v)
+    return [...merged.values()]
+  }
+
+  top(limit = 5): Eater[] {
+    return this.all()
+      .filter(e => e.tokens >= EATER_FLOOR)
+      .sort((a, b) => b.tokens - a.tokens)
+      .slice(0, limit)
+  }
+}
+
+// The tool results that take the most room, the same call on the same target
+// counted together (a file read three times is one row)
+export const eatersOf = (messages: readonly SessionMessage[], limit = 5, cwd = ''): Eater[] => new EaterIndex().update(messages, cwd).top(limit)
 
 // All the tool output still in the conversation
 export const toolTokens = (messages: readonly SessionMessage[]): number =>
@@ -167,28 +307,42 @@ export const toolTokens = (messages: readonly SessionMessage[]): number =>
 // A guard asks the model to narrow a call that ate a lot last time: a whole
 // file read becomes a range, a noisy command gets its output trimmed. Only
 // these two have a smaller form to ask for.
+// A call smaller than this is not worth sending back
+export const GUARD_FLOOR = 1_000
+
 export const guardOf = (eater: Eater): Guard | undefined => {
   const tokens = Math.round(eater.tokens / eater.count)
-  if ((eater.tool !== 'Read' && eater.tool !== 'Bash') || !eater.raw) return undefined
+  if ((eater.tool !== 'Read' && eater.tool !== 'Bash') || !eater.raw || tokens < GUARD_FLOOR) return undefined
   return { tool: eater.tool, key: eater.raw, label: eater.target, tokens }
 }
 
 // Output already narrowed: piped through a filter, or sent to a file
 const NARROWED = /\|\s*(head|tail|grep|rg|wc|jq|awk|sed|cut|sort|uniq|less)\b|(?:^|[^\d&])>\s*[^&\s]/
 
+// A guard nobody has run into for this long is dropped
+export const GUARD_TTL = 30 * 24 * 60 * 60_000
+
+// Two guards are one when they match the same calls; a Bash guard saved
+// before keys were normalized still matches
+const sameKey = (g: Pick<Guard, 'tool' | 'key'>, tool: string, key: string) => g.tool === tool && (tool === 'Bash' ? bashKey(g.key) === bashKey(key) : g.key === key)
+export const isGuarded = (gs: readonly Guard[], g: Pick<Guard, 'tool' | 'key'>) => gs.some(x => sameKey(x, g.tool, g.key))
+
+// Whether a guard still stands: not left idle past its lifetime
+export const isLive = (g: Guard, now: number): boolean => now - (g.lastHit ?? g.at ?? now) < GUARD_TTL
+
 // Which guard, if any, a call runs into
-export const guardHit = (guards: readonly Guard[], call: { tool: string; input: Record<string, unknown> }): Guard | undefined => {
+export const guardHit = (guards: readonly Guard[], call: { tool: string; input: Record<string, unknown> }, now = 0): Guard | undefined => {
   const i = call.input
   if (call.tool === 'Read' && (i.offset !== undefined || i.limit !== undefined || i.pages !== undefined)) return undefined
   if (call.tool === 'Bash' && NARROWED.test(str(i.command))) return undefined
   const raw = rawOf(call)
-  return raw ? guards.find(g => g.tool === call.tool && g.key === raw) : undefined
+  return raw ? guards.find(g => sameKey(g, call.tool, raw) && (now === 0 || isLive(g, now))) : undefined
 }
 
-export const guardMessage = (g: Guard): string =>
+export const guardMessage = (g: Guard, tokens = g.tokens): string =>
   g.tool === 'Read'
-    ? `cc-side-context guard: reading all of ${g.label} put ~${fmt(g.tokens)} tokens into context last time. Read only the part you need (offset/limit), or Grep for it first. If you really need the whole file, make the same call again.`
-    : `cc-side-context guard: \`${g.label}\` printed ~${fmt(g.tokens)} tokens last time. Narrow its output (| tail -n 40, | grep …, or > a file read in parts). If you need all of it, make the same call again.`
+    ? `cc-side-context guard: reading all of ${g.label} costs ~${fmt(tokens)} tokens of context. Read only the part you need (offset/limit), or Grep for it first. If you really need the whole file, make the same call again.`
+    : `cc-side-context guard: \`${g.label}\` printed ~${fmt(tokens)} tokens last time. Narrow its output (| tail -n 40, | grep …, or > a file read in parts). If you need all of it, make the same call again.`
 
 const EDITS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit'])
 const uses = (messages: readonly SessionMessage[]) => messages.flatMap(m => (m.role === 'assistant' ? m.toolUses : []))
@@ -201,17 +355,34 @@ export const changedFiles = (messages: readonly SessionMessage[]): string[] =>
 export const readFiles = (messages: readonly SessionMessage[]): string[] =>
   unique(uses(messages).filter(u => u.tool === 'Read').map(u => str(u.input.file_path)))
 
+// The summary a compaction leaves behind reads as a user message; Claude
+// Code's own opens with this line
+const SUMMARY = /^This session is being continued from a previous conversation/i
+
+// How a summary is recognized again later: its opening
+export const fingerprintOf = (text: string): string => text.slice(0, 200)
+
+const cleanOf = (text: string) => text.replace(/<(system-reminder|local-command-[a-z]+|command-[a-z]+)>[\s\S]*?<\/\1>/g, '').trim()
+
 // What the person typed: their messages without the reminders and command
-// echoes the harness wraps around them
-export const requestsOf = (messages: readonly SessionMessage[]): string[] =>
+// echoes the harness wraps around them, and without compaction summaries
+// (`summaries`: the openings of the ones seen written)
+export const requestsOf = (messages: readonly SessionMessage[], summaries: readonly string[] = []): string[] =>
   messages
     .filter(m => m.role === 'user' && !(m.toolResults?.length))
-    .map(m =>
-      m.text
-        .replace(/<(system-reminder|local-command-[a-z]+|command-[a-z]+)>[\s\S]*?<\/\1>/g, '')
-        .trim(),
-    )
-    .filter(t => t.length > 0)
+    .map(m => cleanOf(m.text))
+    .filter(t => t.length > 0 && !SUMMARY.test(t) && !summaries.some(s => s.length > 0 && t.startsWith(s)))
+
+// The summaries a compaction wrote: the plain user messages afterwards that
+// were not there before
+export const summariesOf = (before: readonly SessionMessage[], after: readonly SessionMessage[]): string[] => {
+  const asked = new Set(before.filter(m => m.role === 'user' && !(m.toolResults?.length)).map(m => cleanOf(m.text)))
+  return after
+    .filter(m => m.role === 'user' && !(m.toolResults?.length))
+    .map(m => cleanOf(m.text))
+    .filter(t => t.length > 0 && !asked.has(t))
+    .map(fingerprintOf)
+}
 
 // The latest todo list's unfinished items
 export const openTasks = (messages: readonly SessionMessage[]): string[] => {
@@ -248,8 +419,12 @@ const section = (title: string, lines: string[], empty = 'none') =>
 
 // A handoff note a fresh session can start from: built from the transcript,
 // so it costs no tokens to write
-export const handoffOf = (messages: readonly SessionMessage[], when: string): string => {
-  const asks = requestsOf(messages)
+// `memo`: what earlier compactions left out of the transcript, the goal and
+// the summaries they wrote
+export const handoffOf = (messages: readonly SessionMessage[], when: string, memo: Memo = { summaries: [] }): string => {
+  const now = requestsOf(messages, memo.summaries)
+  const goal = memo.goal ?? now[0]
+  const asks = memo.goal ? [memo.goal, ...now.filter(a => a !== memo.goal)] : now
   const answer = messages.filter(m => m.role === 'assistant' && m.text.trim()).at(-1)?.text.trim() ?? ''
   return [
     `# Handoff · ${when}`,
@@ -257,7 +432,7 @@ export const handoffOf = (messages: readonly SessionMessage[], when: string): st
     '> Written by cc-side-context from the session transcript. Start a new session with:',
     '> `Read @.claude/side-context/handoff.md and continue from the next step.`',
     '',
-    ...section('Goal', asks[0] ? [clip(asks[0], 800)] : []),
+    ...section('Goal', goal ? [clip(goal, 800)] : []),
     ...section('Latest requests', asks.slice(1).slice(-3).map(a => `- ${clip(a, 300)}`)),
     ...section('Open tasks', openTasks(messages).map(t => `- [ ] ${t}`)),
     ...section('Files changed', changedFiles(messages).slice(-MAX_FILES).map(f => `- ${f}`)),
@@ -287,3 +462,64 @@ export const sparkline = (history: readonly number[], max: number, width: number
 
 const LIMIT_NAMES: Record<string, string> = { five_hour: '5h', seven_day: '7d' }
 export const limitName = (kind: string) => LIMIT_NAMES[kind] ?? kind.replace(/_/g, ' ')
+
+// Where Claude Code keeps a project's transcripts: its path with every
+// character but letters and digits turned into a dash
+export const projectSlug = (cwd: string): string => cwd.replace(/[^A-Za-z0-9]/g, '-')
+
+const parse = (line: string): Record<string, unknown> | undefined => {
+  try {
+    const v: unknown = JSON.parse(line)
+    return typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined
+  } catch {
+    // A line cut at the edge of what was read
+    return undefined
+  }
+}
+
+// A typed prompt's text: the reminders and command echoes around it dropped
+const promptOf = (entry: Record<string, unknown>): string => {
+  if (entry.type !== 'user' || entry.isMeta === true || entry.isSidechain === true) return ''
+  const message = entry.message as { content?: unknown } | undefined
+  const content = message?.content
+  const text =
+    typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content.map(b => (typeof b === 'object' && b !== null && (b as { type?: unknown }).type === 'text' ? str((b as { text?: unknown }).text) : '')).join(' ')
+        : ''
+  const clean = cleanOf(text)
+  return SUMMARY.test(clean) || clean.startsWith('<') ? '' : clean
+}
+
+// What a past session is called, read from the start and the end of its
+// transcript: the name given with /rename, else the one Claude gave it, else
+// its first prompt. Undefined for a session nobody typed anything in.
+export const titleOf = (head: string, tail: string): string | undefined => {
+  let custom = ''
+  let ai = ''
+  for (const line of tail.split('\n')) {
+    const e = line.includes('-title"') ? parse(line) : undefined
+    if (e?.type === 'custom-title') custom = str(e.customTitle) || custom
+    if (e?.type === 'ai-title') ai = str(e.aiTitle) || ai
+  }
+  let first = ''
+  for (const line of head.split('\n')) {
+    if (!line.includes('"type":"user"')) continue
+    const e = parse(line)
+    first = e ? promptOf(e) : ''
+    if (first) break
+  }
+  if (!first && !custom && !ai) return undefined
+  return clip(custom || ai || first, 80)
+}
+
+// 5m ago, 3h ago, 2d ago
+export const agoOf = (ms: number): string => {
+  const m = Math.max(0, Math.floor(ms / 60_000))
+  if (m < 1) return 'just now'
+  if (m < 60) return `${m}m ago`
+  const h = Math.round(m / 60)
+  if (h < 24) return `${h}h ago`
+  return `${Math.round(h / 24)}d ago`
+}

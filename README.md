@@ -52,13 +52,15 @@ Estimate · 23:39
 | Key | Command | Effect |
 | --- | --- | --- |
 | `c` | `/side-context compact` | **Compaction with a keep-list.** Tells the summary to keep your goal and rules word for word, every file changed, decisions and rejected approaches, open tasks and the next step. The same keep-list is also added to auto-compaction and to your own `/compact`. The pane shows `◌ Compacting` while the summary is written. |
-| `w` | `/side-context handoff` | **Handoff note.** Writes `.claude/side-context/handoff.md` (goal, recent requests, open todos, files changed and read, where it stopped) from the transcript, at no token cost, and copies the line to start a fresh session with. |
-| `x` | `/side-context guards` | **Don't let it happen again.** Guards the biggest eater in this project: the next time the model reads that whole file, or runs that command without trimming its output, the call is sent back once with how to make it smaller. Asked a second time, it goes through. `⊘` marks guarded rows; `/side-context guards clear` removes them. |
+| `w` | `/side-context handoff` | **Handoff note.** Writes `.claude/side-context/handoff.md` from the transcript at no token cost: the goal, recent requests, open todos, files changed and read, and where it stopped. It also copies the line that starts a fresh session. The goal survives compactions. The folder gets its own `.gitignore`, and the previous note is kept as `handoff.prev.md`. |
+| `x` | `/side-context guards` | **Don't let it happen again.** Guards the biggest eater in this project: the next time the model reads that whole file, or runs that command without trimming its output, the call is sent back once with advice on how to make it smaller. If the model asks again, the call goes through. `⊘` marks guarded rows. A guard that sends nothing back for 30 days is dropped, and `/side-context guards clear` removes them all. |
+| `p` | | **Resume a past session.** Shown only in a new session, before your first message. It lists this project's 5 latest sessions by name (the `/rename` name, Claude's title, or the first prompt) and how long ago they ran. Press a number to continue one, the same as `/resume`. Once the conversation starts, the button goes away. |
 | | `/side-context stats` | **Session stats** to share: context now, turns, the peak, compactions and cold caches since launch, and how much of the tool output the top eaters took. Copied to the clipboard. |
 | `s` | | Switch between the list and the `/context` grid (under **more**). |
 | `e` | | Show the largest memory files, loaded MCP tools, skills, and the tools loaded on demand. |
 | `r` | `/side-context full` | Recount exactly with the token-count API, as `/context` does (under **more**, or when a row is flagged). |
 | | `/side-context` · `on` · `off` | Toggle, show or hide the pane. |
+| | `/side-context help` | List the options. |
 
 ## Install
 
@@ -101,24 +103,48 @@ Set in `/config` → plugin options, or with `claude plugin configure cc-side-co
 
 - **Estimate vs. exact.** After each turn, the breakdown refreshes from a free local estimate. An estimate can only raise a question (`?`). Only an exact count (`r`, or the storage view) flags a row as too large (`*`). Exact counts send token-count requests, as `/context` does.
 - **After `/clear` or `/resume`** the pane measures the new conversation at once. The cache countdown starts again at its first reply.
-- **Top eaters** are sized from each tool result's text (about 4 characters a token), so they read `~`. Results that compaction has already summarized drop off the list.
+- **Top eaters** are sized from each tool result's text, so they read `~`: about 4 characters a token for English and code, 2 for accented and non-Latin text, 1 for CJK and emoji. After an exact count (`r`), the sizes are scaled to match it. Results that compaction has already summarized drop off the list.
+- **Grid view** keeps `/context`'s exact count and recounts it at most once a minute while open.
 - **Cache countdown** starts at the last main-thread response. The 5m/1h guess can be wrong for your setup: set `cacheTtl` if it is.
-- **Privacy.** Nothing leaves your machine apart from the exact counts. The handoff note is the only file the plugin writes; guards are kept in the plugin's own store.
+- **Privacy.** Nothing leaves your machine except the exact counts, which go to the same token-count API that `/context` uses. The only files the plugin writes are in `.claude/side-context/` (the handoff note, the one before it, and a `.gitignore` that keeps them out of git). The resume list reads the start and end of this project's transcripts in your Claude Code config directory, locally. Guards and each session's goal are kept in the plugin's own store under your Claude Code config directory.
+
+## Troubleshooting
+
+| | |
+| --- | --- |
+| The pane does not open | Your terminal may be narrower than 144 columns. Open it with `/side-context`. If the command is unknown, check that your Claude Code build has function hooks (see Requirements) and that you restarted after installing. |
+| The pane says `Measuring…` | It shows the figures after the first reading. If it stays, send a message or run `/side-context on`. |
+| A row is flagged `?` | That is an estimate raising a question. Press `r` for an exact count, which settles it (`*` or no flag). |
+| The cache countdown is wrong | Set `cacheTtl` to `5m` or `1h` in the plugin options. |
+| A guard keeps getting in the way | `/side-context guards` lists the guards, and `/side-context guards clear` removes them. The model can always repeat a call to get through. |
+
+Something else? [Open an issue](https://github.com/bcanozgur/cc-side-context/issues) with your Claude Code version (`claude --version`) and, if you can, the output of `/side-context stats`.
+
+## Uninstall
+
+```text
+/plugin uninstall cc-side-context@cc-side-context
+```
+
+You can also delete `.claude/side-context/` in projects where you wrote handoff notes.
 
 ## Develop
 
 ```text
-hooks/register.tsx   the hooks module: commands, refresh, compaction, pane drawing
-hooks/analysis.ts    transcript analysis: eaters, command labels, guards, keep-list, handoff
+hooks/register.tsx   the hooks module: commands, measuring, compaction, guards, handoff
+hooks/pane.tsx       drawing the pane
+hooks/analysis.ts    transcript analysis: eaters, sizes, command labels, guards, keep-list, handoff
 types/index.d.ts     state contract and snapshot types
 tests/               claude plugin test suite
 ```
 
 ```bash
-claude plugin validate .
+claude plugin validate --strict .
 claude plugin test .
 claude --plugin-dir .   # load the working copy into a session
 ```
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## License
 

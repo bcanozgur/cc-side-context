@@ -8,7 +8,11 @@ Drafts for announcing cc-side-context. Nothing here is posted yet. Fill in the r
 - [ ] Take one screenshot of the pane with the eaters list and the cache countdown visible, for X and HN.
 - [ ] Note the real top eaters from one of your long sessions, for the posts.
 - [ ] Check the function hooks API status. If it is still early access, say so in every post: people who cannot install it get annoyed.
-- [ ] Tag a release (`v0.3.0`) so the marketplace install picks up the new version.
+- [ ] Tag a release (`v0.5.0`) and create a GitHub release from the CHANGELOG entry, so the marketplace install picks up the new version.
+- [ ] Do a clean install from the marketplace on a second machine or a fresh config (`CLAUDE_CONFIG_DIR=$(mktemp -d) claude`), and go through the README install steps exactly as written.
+- [ ] Check that the CI run on GitHub is green before posting the link.
+- [ ] Set the GitHub repo description, topics (`claude-code`, `claude-code-plugin`, `context-window`) and social preview image (the pane screenshot).
+- [ ] Keep the first two hours after posting free to answer comments and fix install problems quickly.
 
 ## r/ClaudeAI (and r/ClaudeCode)
 
