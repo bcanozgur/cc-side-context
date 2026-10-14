@@ -82,8 +82,9 @@ const clip = (s: string, n: number) => {
   return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat
 }
 
-// Shell words, quotes kept together, and the operators between commands
-const WORDS = /'[^']*'|"(?:\\.|[^"\\])*"|&&|\|\||[;|&]|[^\s;|&'"]+/g
+// Shell words, quotes kept together, and the operators between commands; a
+// redirect such as 2>&1 or &>log is a word, not a command in the background
+const WORDS = /'[^']*'|"(?:\\.|[^"\\])*"|\d*[<>]&(?:\d+|-)|&>>?[^\s;|&'"]*|&&|\|\||[;|&]|[^\s;|&'"]+/g
 const OPERATOR = /^(&&|\|\||[;|&])$/
 // Commands that only set the stage for the one doing the work
 const PRELUDE = new Set(['cd', 'pushd', 'popd', 'export', 'source', '.', 'set', 'true'])
@@ -92,37 +93,53 @@ const WRAPPERS = new Set(['sudo', 'rtk', 'time', 'env', 'nohup', 'command', 'exe
 const SUBCOMMANDS = new Set(['git', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'bunx', 'cargo', 'go', 'docker', 'kubectl', 'gh', 'claude', 'make', 'pip', 'pip3', 'brew', 'uv', 'deno'])
 const unquote = (w: string) => w.replace(/^(['"])([\s\S]*)\1$/, '$2')
 const isFlag = (w: string) => w.startsWith('-')
-const isRedirect = (w: string) => /^\d*[<>]/.test(w)
+const isRedirect = (w: string) => /^(\d*[<>]|&>)/.test(w)
 const isPath = (w: string) => /[/.]/.test(w) && !/[*?|()\\\s]/.test(w) && !isFlag(w)
 
 // What a shell command does, in a few words: the cd and env in front dropped,
-// a path made short, a heredoc called a script.
+// a path made short, a heredoc called a script. Each command of a chain is
+// named, as any of them may be the one that printed most; a pipe's later
+// stages only trim the first one's output, so they go unnamed.
 // `cd /tmp/x && grep -n "a\|b" hooks/register.tsx` -> grep hooks/register.tsx
+// `ls && git diff` -> ls && git diff
 export const commandOf = (command: string, cwd = ''): string => {
   const words = command.split('\n')[0]?.match(WORDS) ?? []
-  const segments: string[][] = [[]]
+  // The first stage of each command in the chain
+  const firsts: string[][] = [[]]
+  let isPiped = false
   for (const w of words) {
-    if (OPERATOR.test(w)) segments.push([])
-    else segments.at(-1)?.push(w)
+    if (w === '|') isPiped = true
+    else if (OPERATOR.test(w)) {
+      firsts.push([])
+      isPiped = false
+    } else if (!isPiped) firsts.at(-1)?.push(w)
   }
-  const bare = segments
+  const bare = firsts
     .map(seg => {
       let i = 0
       while (i < seg.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(seg[i] ?? '') || WRAPPERS.has(seg[i] ?? ''))) i++
       return seg.slice(i)
     })
     .filter(seg => seg.length > 0)
-  const seg = bare.find(s => !PRELUDE.has(s[0] ?? '')) ?? bare[0]
-  if (!seg) return clip(command, 40)
+  const working = bare.filter(s => !PRELUDE.has(s[0] ?? ''))
+  const segs = working.length > 0 ? working : bare.slice(0, 1)
+  if (segs.length === 0) return clip(command, 40)
+  const names = [...new Set(segs.map(seg => nameOf(seg, cwd)))]
+  return clip(names.join(' && '), 40)
+}
+
+// One command of a chain, in a few words: git status, sed hooks/analysis.ts
+const nameOf = (seg: string[], cwd: string): string => {
   const name = (seg[0] ?? '').split('/').pop() ?? ''
   const rest = seg.slice(1)
   if (rest.some(w => w.startsWith('<<')) || (/^(python|node|ruby|perl|bash|sh|zsh)/.test(name) && rest.includes('-c'))) return `${name} script`
-  const args = rest.filter(w => !isFlag(w) && !isRedirect(w)).map(unquote)
+  // A bare redirect takes the word after it too: `> out.log` names no input
+  const args = rest.filter((w, i) => !isFlag(w) && !isRedirect(w) && !/^(\d*[<>]+|&>>?)$/.test(rest[i - 1] ?? '')).map(unquote)
   const path = args.find(isPath)
   const shown = path ? short(path, cwd) : ''
-  if (SUBCOMMANDS.has(name) && args[0] && args[0] !== path) return clip(`${name} ${args[0]}${shown ? ` ${shown}` : ''}`, 40)
-  if (shown) return clip(`${name} ${shown}`, 40)
-  return clip(args[0] ? `${name} ${args[0]}` : name, 40)
+  if (SUBCOMMANDS.has(name) && args[0] && args[0] !== path) return `${name} ${args[0]}${shown ? ` ${shown}` : ''}`
+  if (shown) return `${name} ${shown}`
+  return args[0] ? `${name} ${args[0]}` : name
 }
 
 // The command a guard matches on: the cd, export and env in front dropped
@@ -446,18 +463,6 @@ export const stamp = (ms: number): string => {
   const d = new Date(ms)
   const two = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`
-}
-
-const BLOCKS = '▁▂▃▄▅▆▇█'
-
-// Context over the turns, one block a turn scaled to `max`; the newest at the
-// right, as many as fit
-export const sparkline = (history: readonly number[], max: number, width: number): string => {
-  if (max <= 0) return ''
-  return history
-    .slice(-width)
-    .map(v => BLOCKS[Math.max(0, Math.min(BLOCKS.length - 1, Math.floor((v / max) * BLOCKS.length)))])
-    .join('')
 }
 
 const LIMIT_NAMES: Record<string, string> = { five_hour: '5h', seven_day: '7d' }

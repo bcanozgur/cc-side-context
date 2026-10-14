@@ -3,6 +3,7 @@ import type { On, SessionMessage, SessionUsage, UiPane } from 'claude-code'
 import type { TestBody } from 'claude-code/testing'
 
 import { EaterIndex, GUARD_TTL, agoOf, bashKey, commandOf, eatersOf, estimate, fitWidth, projectSlug, titleOf, widthOf } from '../hooks/analysis'
+import { shownEaters } from '../hooks/pane'
 
 const PANE = 'side-context'
 const START = { cwd: '/tmp', surface: 'terminal', isInteractive: true } as const
@@ -75,6 +76,12 @@ const engine = (on: On, current: SessionUsage = usage, messages: () => SessionMe
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('turn.complete', (_$, e) => ({ text: e.answer, usage: e.usage }))
+  on('turn.start', (_$, e) => ({ turnId: e.turnId }))
+  // A model request that asked for a tool, answered at once
+  on('turn.step', async function* (_$, e) {
+    const reply = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: 'claude-opus-5-5' }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'tool_use' as const, usage: reply }
+  })
   on('command.register', () => ({ value: { command: 'side-context' } }))
   on('session.usage', (_$, e) => {
     breakdowns.push((e as { breakdown?: string } | undefined)?.breakdown)
@@ -150,7 +157,16 @@ test('draws the breakdown on every surface', async ($, on) => {
     })
     const drawn = JSON.stringify(await pane.drawn())
     expect(drawn).toContain('84.0k')
-    expect(drawn).toContain(' / 200.0k')
+    // the bar is the whole window, with auto-compact a mark on it and the room before it
+    expect(drawn).toContain(' / 200.0k window')
+    expect(drawn).toContain(' 42%')
+    expect(drawn).toContain('auto-compact 167.0k')
+    expect(drawn).toContain('83.0k left')
+    expect(drawn).toContain('┃')
+    // its key, in the colours of the In context rows
+    expect(drawn).toContain('["setup"]')
+    expect(drawn).toContain('["conversation"]')
+    expect(drawn).not.toContain('["turn"]')
     // full labels, not clipped; one "(deferred)" at most; Skills flagged
     expect(drawn).toContain('System prompt')
     expect(drawn).toContain('Conversation')
@@ -230,10 +246,19 @@ test('lists the tool results eating the most context, a repeated read as one row
   expect(drawn).toContain('Read src/big.ts ×2')
   expect(drawn).toContain('~20.0k')
   expect(drawn).toContain('Bash npm test')
-  // the biggest eater comes with what to do about it
-  expect(drawn).toContain('Read a range (offset/limit)')
+  // each row says how much of the conversation it is
+  expect(drawn).toContain('of conversation')
+  expect(drawn).toContain('~20.0k  28%')
+  expect(drawn).toContain('~2.0k   3%')
+  // the row x would guard is marked, and the advice says what the press does
+  expect(drawn).toContain('▸ ')
+  expect(drawn).toContain('x guards ▸: next time Claude is asked to read a range')
   // a tiny edit result is not worth a row
   expect(drawn).not.toContain('Edit src/fetch.ts')
+  // the conversation leads the breakdown; what was loaded at the start follows under its sum
+  expect(drawn.indexOf('Conversation')).toBeLessThan(drawn.indexOf('Setup, loaded at start'))
+  expect(drawn).toContain('Setup, loaded at start')
+  expect(drawn.indexOf('Skills')).toBeLessThan(drawn.indexOf('System prompt'))
 })
 
 test('compaction is told to keep decisions and the files changed', async ($, on) => {
@@ -305,6 +330,132 @@ test('counts down the prompt cache, and warns once when it goes cold', async ($,
   expect(toasts.filter(t => t.includes('Prompt cache expired')).length).toBe(1)
 })
 
+// One model request of a turn, read to its end as the engine reads it
+const step = async ($: Parameters<TestBody>[0], index: number, agentId?: string) => {
+  const stream = $.turn.step({ turnId: 'turn', index, model: 'claude-opus-5-5', messageCount: index + 1, ...(agentId ? { agentId } : {}) })
+  for await (const _ of stream);
+  return stream.result
+}
+
+test('a turn of many tool calls moves the pane with each response, not only at its end', async ($, on) => {
+  const current: SessionUsage = { ...usage, context: { ...usage.context } }
+  const { clock, breakdowns } = engine(on, current)
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  await clock.settle()
+  const pane = await mount($)
+  await $.turn.start({ text: 'Add retries', turnId: 'turn' })
+
+  // session.measure stays quiet until the turn ends; each response moves the
+  // figure and reads the breakdown again
+  const read = breakdowns.length
+  for (const [i, tokens] of [96_000, 118_000].entries()) {
+    current.context = { ...usage.context, tokens }
+    await step($, i)
+    await clock.settle()
+  }
+  let drawn = JSON.stringify(await pane.drawn())
+  expect(drawn).toContain('118.0k')
+  // grown since the turn began, not since the response before, and drawn
+  // as the bar's end
+  expect(drawn).toContain('+34.0k')
+  expect(drawn).toContain('["turn"]')
+  expect(breakdowns.slice(read)).toContain('summary')
+
+  // a subagent's requests fill its own window, not this one
+  current.context = { ...usage.context, tokens: 150_000 }
+  await step($, 0, 'agent-1')
+  await clock.settle()
+  expect(JSON.stringify(await pane.drawn())).not.toContain('150.0k')
+
+  // a rate-limit window moving mid-turn does not restart the count
+  current.context = { ...usage.context, tokens: 119_000 }
+  await $.session.measure({ context: { ...current.context, breakdown: undefined }, rateLimits: [], changed: ['context', 'rateLimits'] })
+  // and the turn's end keeps the whole turn's growth
+  current.context = { ...usage.context, tokens: 120_000 }
+  await $.session.measure({ context: { ...current.context, breakdown: undefined }, rateLimits: [], changed: ['context'] })
+  drawn = JSON.stringify(await pane.drawn())
+  expect(drawn).toContain('120.0k')
+  expect(drawn).toContain('+36.0k')
+
+  // the next turn counts from there, and has added nothing until it answers
+  await $.turn.start({ text: 'Now the tests', turnId: 'turn-2' })
+  drawn = JSON.stringify(await pane.drawn())
+  expect(drawn).not.toContain('+36.0k')
+  expect(drawn).not.toContain('["turn"]')
+  current.context = { ...usage.context, tokens: 125_000 }
+  await step($, 0)
+  await clock.settle()
+  expect(JSON.stringify(await pane.drawn())).toContain('+5.0k')
+})
+
+test('on a 1M window the bar is the whole window, the quality limit a mark on it', async ($, on) => {
+  const b = usage.context.breakdown
+  const categories = [
+    { name: 'System prompt', tokens: 4_700, color: 'promptBorder', isDeferred: false, kind: 'used' as const },
+    { name: 'System tools', tokens: 27_600, color: 'inactive', isDeferred: false, kind: 'used' as const },
+    { name: 'Skills', tokens: 6_000, color: 'warning', isDeferred: false, kind: 'used' as const },
+    { name: 'Messages', tokens: 94_300, color: 'claude', isDeferred: false, kind: 'used' as const },
+  ]
+  const at = (tokens: number): SessionUsage => ({
+    ...usage,
+    context: { tokens, window: 1_000_000, percent: Math.round(tokens / 10_000), breakdown: b && { ...b, categories, autoCompactThreshold: 967_000 } },
+  })
+  const current = at(127_900)
+  const { clock } = engine(on, current)
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  await clock.settle()
+  await $.turn.start({ text: 'Add retries', turnId: 'turn' })
+  current.context = at(132_600).context
+  await step($, 0)
+  await clock.settle()
+
+  const drawn = JSON.stringify(await (await mount($)).drawn())
+  // the window is the bar's end; past half the quality limit the status says so
+  expect(drawn).toContain(' / 1.0M window')
+  expect(drawn).toContain(' 13%')
+  expect(drawn).toContain('● Filling')
+  expect(drawn).toContain('quality limit 250.0k')
+  expect(drawn).toContain('117.4k left')
+  // every part the key names has a cell, small as it is on this scale
+  for (const part of ['setup', 'conversation', 'turn']) expect(drawn).toContain(`["${part}"]`)
+  expect(drawn).toContain('+4.7k')
+})
+
+test('with auto-compact off the bar counts towards the window', async ($, on) => {
+  const b = usage.context.breakdown
+  engine(on, { ...usage, context: { ...usage.context, breakdown: b && { ...b, isAutoCompactEnabled: false } } })
+  await $.session.start(START)
+  await $.command.run(run('on'))
+
+  const drawn = JSON.stringify(await (await mount($)).drawn())
+  expect(drawn).toContain(' / 200.0k window')
+  expect(drawn).toContain(' 42%')
+  expect(drawn).toContain('116.0k left')
+  expect(drawn).toContain('auto-compact off')
+  // no limit before the window's end, so no mark
+  expect(drawn).not.toContain('┃')
+  expect(drawn).not.toContain('░')
+})
+
+test('a turn that runs past the cache lifetime keeps the cache warm', async ($, on) => {
+  const { toasts, clock } = engine(on)
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  await $.turn.complete(turn)
+  await $.turn.start({ text: 'Add retries', turnId: 'turn' })
+
+  // an API key's five minutes, crossed by a turn that keeps sending requests
+  for (let i = 0; i < 4; i++) {
+    await clock.advance(2 * 60_000)
+    await step($, i)
+    await clock.settle()
+  }
+  expect(toasts.filter(t => t.includes('Prompt cache expired'))).toEqual([])
+  expect(JSON.stringify(await (await mount($)).drawn())).not.toContain('cache cold')
+})
+
 const big: SessionUsage = {
   ...usage,
   rateLimits: [{ kind: 'five_hour', percentUsed: 34 }],
@@ -331,8 +482,13 @@ test('a 1M window warns at the quality budget, long before auto-compact', async 
   const drawn = JSON.stringify(await pane.drawn())
   await pane.unmount()
   expect(drawn).toContain('Time to compact')
-  expect(drawn).toContain('0 to quality limit')
-  expect(drawn).toContain('▄█')
+  // the bar is the whole 1M window; the quality limit is a mark on it, and the
+  // line beside the mark says how far past it the context is
+  expect(drawn).toContain(' / 1.0M window')
+  expect(drawn).toContain(' 30%')
+  expect(drawn).toContain('quality limit 250.0k')
+  expect(drawn).toContain('50.0k over')
+  expect(drawn).toContain('░')
   expect(drawn).toContain('5h 34%')
   expect(drawn).toContain('$1.50')
   // a subscription's cache lasts an hour
@@ -354,7 +510,7 @@ test('a /compact from the chat redraws the pane without waiting for a reply', as
   await $.session.compact({ trigger: 'manual', messages: transcript })
   let drawn = JSON.stringify(await pane.drawn())
   expect(drawn).not.toContain('Time to compact')
-  expect(drawn).toContain('220.0k to quality limit')
+  expect(drawn).toContain('220.0k left')
 
   // once installed, the fill is unreported until the next response
   current.context = { ...big.context, tokens: undefined, percent: undefined }
@@ -396,6 +552,40 @@ test('a resumed or cleared conversation is measured again at once', async ($, on
   expect(drawn).toContain('84.0k')
 })
 
+test('a /resume shows the resumed fill, not an estimate taken before it was in place', async ($, on) => {
+  // The engine has no fill until the first response, and its first estimate
+  // is of the empty conversation the resume replaces
+  const current: SessionUsage = {
+    ...usage,
+    context: { window: 1_000_000, breakdown: { ...usage.context.breakdown!, totalTokens: 39_800, rawMaxTokens: 1_000_000 } },
+  }
+  let messages: SessionMessage[] = []
+  const { clock } = engine(on, current, () => messages)
+  on('classic.SessionStart', () => ({}))
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  const pane = await mount($)
+  await clock.settle()
+
+  await $.session.end({ reason: 'resume', sessionId: 'old', resume: { sessionId: 'old' } as never })
+  messages = transcript
+  await $.classic.SessionStart({ source: 'resume', context_tokens: 540_000, seconds_since_last_response: 60 })
+  await clock.settle()
+  const resumed = JSON.stringify(await pane.drawn())
+  expect(resumed).toContain('540.0k')
+  expect(resumed).not.toContain('39.8k')
+  expect(resumed).not.toContain('pick up a past one')
+
+  // The first turn grows it from the resumed fill, not from the empty one
+  await $.turn.start({ turnId: 't1' } as never)
+  current.context = { ...current.context, tokens: 553_600, percent: 55 }
+  await $.session.measure({ context: { ...current.context, breakdown: undefined }, rateLimits: [], changed: ['context'] })
+  await clock.settle()
+  const after = JSON.stringify(await pane.drawn())
+  expect(after).toContain('+13.6k')
+  expect(after).not.toContain('+513')
+})
+
 test('a Bash row says what the command did, not how it was spelled', async () => {
   expect(commandOf('cd /private/tmp/x && grep -n "drawn\\|mount(" /repo/hooks/register.tsx', '/repo')).toBe('grep hooks/register.tsx')
   expect(commandOf("python3 - <<'EOF'\nprint(1)\nEOF")).toBe('python3 script')
@@ -403,6 +593,22 @@ test('a Bash row says what the command did, not how it was spelled', async () =>
   expect(commandOf('FOO=1 rtk git status')).toBe('git status')
   expect(commandOf('npm test 2>&1 | tail -20')).toBe('npm test')
   expect(commandOf('ls')).toBe('ls')
+  // every command of a chain is named, as any may be the one that printed most
+  expect(commandOf('cd /repo && ls && git diff', '/repo')).toBe('ls && git diff')
+  expect(commandOf('git status --short && git diff --stat | head -5')).toBe('git status && git diff')
+  expect(commandOf('npm test &> out.log')).toBe('npm test')
+  expect(commandOf('make build > build.log 2>&1 && ./run.sh')).toBe('make build && run.sh')
+  expect(commandOf('cd /repo && ls && git diff && git log && cat hooks/register.tsx', '/repo').length).toBeLessThanOrEqual(40)
+})
+
+test('an eater needs a hundredth of the budget for a row, so x never guards a hidden one', async () => {
+  const eater = (tokens: number) => ({ tool: 'Bash', target: `cmd ${tokens}`, tokens, count: 1, raw: `cmd ${tokens}` })
+  const live = { eaters: [eater(3_000), eater(1_200)], scale: 1, snapshot: { compactAt: 900_000, window: 1_000_000 } }
+  // a 250k budget: 2.5k and up
+  expect(shownEaters(live as never, 250_000).map(e => e.tokens)).toEqual([3_000])
+  // never under a guard's floor, however small the budget
+  expect(shownEaters({ ...live, snapshot: { compactAt: 50_000, window: 64_000 } } as never, 0).map(e => e.tokens)).toEqual([3_000, 1_200])
+  expect(shownEaters({ ...live, eaters: [eater(800)] } as never, 250_000)).toEqual([])
 })
 
 test('x guards the biggest eater: the next whole read is sent back once', async ($, on) => {
@@ -418,7 +624,10 @@ test('x guards the biggest eater: the next whole read is sent back once', async 
 
   const pane = await mount($)
   await pane.press({ key: 'guard' })
-  expect(JSON.stringify(await pane.drawn())).toContain('⊘')
+  const guarded = JSON.stringify(await pane.drawn())
+  expect(guarded).toContain('⊘')
+  // the mark moves on to the next row x would guard
+  expect(guarded).toContain('x guards ▸: next time Claude is asked to trim its output')
 
   const first = await $.tool.call({ tool: 'Read', file_path: '/repo/src/big.ts' } as never)
   expect(JSON.stringify(first)).toContain('offset/limit')
@@ -674,7 +883,7 @@ test('a fresh session offers its project\'s past sessions, and a number resumes 
   await $.session.start(START)
   const pane = await mount($)
   await clock.settle()
-  expect(JSON.stringify(await pane.drawn())).toContain('resume [p]')
+  expect(JSON.stringify(await pane.drawn())).toContain('"key":"resume"')
 
   await pane.press({ key: 'resume' })
   await clock.settle()
@@ -708,7 +917,7 @@ test('once the conversation starts, resume is gone', async ($, on) => {
   await clock.settle()
   const drawn = JSON.stringify(await pane.drawn())
   expect(drawn).not.toContain('Resume a session')
-  expect(drawn).not.toContain('resume [p]')
+  expect(drawn).not.toContain('"key":"resume"')
 })
 
 test('a session already under way does not offer resume', async ($, on) => {
@@ -716,7 +925,7 @@ test('a session already under way does not offer resume', async ($, on) => {
   await $.session.start(START)
   const pane = await mount($)
   await clock.settle()
-  expect(JSON.stringify(await pane.drawn())).not.toContain('resume [p]')
+  expect(JSON.stringify(await pane.drawn())).not.toContain('"key":"resume"')
 })
 
 test('a past session is named by /rename, then by Claude, then by its first prompt', async () => {

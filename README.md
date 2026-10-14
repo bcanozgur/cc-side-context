@@ -16,35 +16,44 @@ A live side pane for [Claude Code](https://claude.com/claude-code). It shows whi
 ## What it shows
 
 ```
-● Healthy  56.3k / 1.0M                        +4.7k
-███▒▒░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-▂▂▃▅  193.7k to quality limit
+● Healthy                                      +4.7k
+
+56.3k / 1.0M window                               6%
+█████████████┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+█████████████┃░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+■ setup  ■ conversation  ■ turn
+┃ quality limit 250.0k                   193.7k left
+
 cache 59m · 5h 49% · 7d 68% · $1.24
 
-■ System prompt                                 4.7k
-■ Built-in tools                               27.6k
-■ Skills                                        6.0k
+In context                                     54.6k
 ■ Conversation                                 16.3k
+■ Setup, loaded at start                       38.3k
+    Built-in tools                             27.6k
+    Skills                                      6.0k
+    System prompt                               4.7k
 
-Top context eaters
-  Read package-lock.json ×3                   ~61.2k
-  github › get_issue                          ~11.4k
-⊘ Bash npm test                               ~8.3k
-  ↳ Read a range (offset/limit), not the whole file
+Top context eaters                   of conversation
+▸ Read package-lock.json ×3               ~6.1k  37%
+  github › get_issue                      ~3.4k  21%
+⊘ Bash npm test                           ~2.3k  14%
+  ↳ x guards ▸: next time Claude is asked to read a range
 
-[ compact [c] ] [ handoff [w] ] [ guard [x] ]
-[ more [e] ]
+────────────────────────────────────────────────────
+Nothing to do now
+c: compact  w: handoff  x: guard  e: more
 Estimate · 23:39
 ```
 
 | | |
 | --- | --- |
-| **Top context eaters** | The tool results still in your conversation, biggest first. Repeated reads of the same target are merged into one row, and shell commands are shown by what they did (`grep hooks/register.tsx`, not the `cd … &&` in front). The biggest one comes with a tip on how to keep it smaller next time. |
-| **Per-category breakdown** | System prompt, tools, MCP, memory files, skills and conversation, live after every turn. Free space and the compact reserve are the pale end of the bar. A row that is larger than usual is flagged, with a one-line fix under it. |
-| **Room left** | How far it is to the quality limit (or to auto-compact), with a trend of the context after each turn. A drop is a compaction. |
+| **Top context eaters** | The tool results still in your conversation, biggest first, each with its share of the conversation. Only calls over a hundredth of the budget (1k at least) get a row. Repeated reads of the same target are merged into one row, and shell commands are shown by what they did (`grep hooks/register.tsx`, not the `cd … &&` in front; every command of a chain, `ls && git diff`). `▸` marks the row `x` would guard, and the line under the list says what that does; with nothing to guard, it is a tip on how to keep the biggest one smaller. |
+| **Next step** | One line above the buttons, read from the state: time to compact, rows to count exactly, a guard or a handoff while the context fills, or a past session to resume in a new one. Its button is drawn at full strength and the rest dim. |
+| **The bar** | One bar as long as the context window, so its end is the window's end (1.0M on a 1M model). It is split by what you can do about each part: **setup**, trimmed in settings; the **conversation**, which `c` and `w` act on; and the **turn**, what the latest turn added, at the growing end, the same as the `+` figure. `┃` marks where the pane warns: the quality limit on a large window, otherwise auto-compact. The track up to it is the room you have, the pale `░` past it is window you should not need, and the line under the key says how much is left before the mark, or how far past it the context is. The percent is of the window, as Claude Code's status line counts it; the status and the mark's colour are of the limit. |
+| **Per-category breakdown** | The conversation first, as the part that grows; then what was loaded at the start (system prompt, tools, MCP, memory files, skills) under its sum, each part beneath it, biggest first. The marks are the bar's colours. Live after every response, while a turn runs too. A row that is larger than usual is flagged, with a one-line fix under it. |
 | **Prompt cache** | `cache 58m` counts down from the last reply. When the cache goes cold you get one warning, before your next message pays to write the whole conversation into it again. |
 | **Limits and cost** | 5h and 7d usage on a subscription, and session cost on an API key. |
-| **Quality limit** | On large windows the pane warns at 250k tokens (configurable), long before auto-compact would start. |
+| **Quality limit** | On large windows the pane marks 250k tokens (configurable) on the bar and warns there, long before auto-compact would start. |
 | **Grid view** | The same grid and category list that `/context` draws (⛁ ⛀ ⛶ ⛝). |
 
 ## What it does
@@ -53,7 +62,7 @@ Estimate · 23:39
 | --- | --- | --- |
 | `c` | `/side-context compact` | **Compaction with a keep-list.** Tells the summary to keep your goal and rules word for word, every file changed, decisions and rejected approaches, open tasks and the next step. The same keep-list is also added to auto-compaction and to your own `/compact`. The pane shows `◌ Compacting` while the summary is written. |
 | `w` | `/side-context handoff` | **Handoff note.** Writes `.claude/side-context/handoff.md` from the transcript at no token cost: the goal, recent requests, open todos, files changed and read, and where it stopped. It also copies the line that starts a fresh session. The goal survives compactions. The folder gets its own `.gitignore`, and the previous note is kept as `handoff.prev.md`. |
-| `x` | `/side-context guards` | **Don't let it happen again.** Guards the biggest eater in this project: the next time the model reads that whole file, or runs that command without trimming its output, the call is sent back once with advice on how to make it smaller. If the model asks again, the call goes through. `⊘` marks guarded rows. A guard that sends nothing back for 30 days is dropped, and `/side-context guards clear` removes them all. |
+| `x` | `/side-context guards` | **Don't let it happen again.** Guards the biggest eater in this project: the next time the model reads that whole file, or runs that command without trimming its output, the call is sent back once with advice on how to make it smaller. If the model asks again, the call goes through. `▸` marks the row it would guard and `⊘` the guarded ones; with nothing to guard, the button stays in place, dim. A guard that sends nothing back for 30 days is dropped, and `/side-context guards clear` removes them all. |
 | `p` | | **Resume a past session.** Shown only in a new session, before your first message. It lists this project's 5 latest sessions by name (the `/rename` name, Claude's title, or the first prompt) and how long ago they ran. Press a number to continue one, the same as `/resume`. Once the conversation starts, the button goes away. |
 | | `/side-context stats` | **Session stats** to share: context now, turns, the peak, compactions and cold caches since launch, and how much of the tool output the top eaters took. Copied to the clipboard. |
 | `s` | | Switch between the list and the `/context` grid (under **more**). |
@@ -101,7 +110,7 @@ Set in `/config` → plugin options, or with `claude plugin configure cc-side-co
 
 ## How the numbers are made
 
-- **Estimate vs. exact.** After each turn, the breakdown refreshes from a free local estimate. An estimate can only raise a question (`?`). Only an exact count (`r`, or the storage view) flags a row as too large (`*`). Exact counts send token-count requests, as `/context` does.
+- **Estimate vs. exact.** After each response, the breakdown refreshes from a free local estimate. An estimate can only raise a question (`?`). Only an exact count (`r`, or the storage view) flags a row as too large (`*`). Exact counts send token-count requests, as `/context` does.
 - **After `/clear` or `/resume`** the pane measures the new conversation at once. The cache countdown starts again at its first reply.
 - **Top eaters** are sized from each tool result's text, so they read `~`: about 4 characters a token for English and code, 2 for accented and non-Latin text, 1 for CJK and emoji. After an exact count (`r`), the sizes are scaled to match it. Results that compaction has already summarized drop off the list.
 - **Grid view** keeps `/context`'s exact count and recounts it at most once a minute while open.

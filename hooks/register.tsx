@@ -23,7 +23,7 @@ import {
   toolTokens,
   widthOf,
 } from './analysis'
-import { TITLE, drawPane, glyphOf, nextGuard, scaled, top } from './pane'
+import { TITLE, drawPane, glyphOf, nextGuard, scaled, shownEaters, top } from './pane'
 
 export { fmt }
 
@@ -62,6 +62,7 @@ const FRESH: Live = {
   exactAt: null,
   memo: { summaries: [] },
   fresh: null,
+  seed: null,
 }
 
 const live = atom({ plugin: 'cc-side-context', key: 'live' } as const, FRESH)
@@ -76,6 +77,22 @@ const picker = atom({ plugin: 'cc-side-context', key: 'picker' } as const, { sta
 const patch = ($: EngineInterface, fn: (l: Live) => Partial<Live>) => update($, live, l => ({ ...l, ...fn(l) }))
 
 const percentOf = (tokens: number, window: number) => (window > 0 ? Math.round((tokens / window) * 100) : 0)
+
+// The fill a response reported: the figure, how far the turn has grown it
+// since it began, and the peak
+const filled = (l: Live, context: SessionContextUsage): Partial<Live> => {
+  const tokens = context.tokens
+  if (tokens === undefined) return {}
+  // The first turn counts from the opening measurement
+  const from = l.last ?? l.snapshot?.tokens ?? null
+  return {
+    delta: from === null ? 0 : tokens - from,
+    last: from,
+    snapshot: l.snapshot === null ? null : { ...l.snapshot, tokens, percent: context.percent ?? percentOf(tokens, l.snapshot.window) },
+    stats: { ...l.stats, peak: Math.max(l.stats.peak, tokens) },
+    seed: null,
+  }
+}
 
 export const toSnapshot = (
   context: SessionContextUsage,
@@ -143,11 +160,21 @@ const scaleOf = (snap: Snapshot): number | undefined => {
   return Math.min(1.6, Math.max(0.6, exact / index.total))
 }
 
+// Bumped each time the conversation is replaced (/clear, /resume): a reading
+// begun before is of the old one, and is dropped rather than written over the new
+let generation = 0
+
 const refresh = async ($: EngineInterface, detail: Snapshot['detail']) => {
+  const gen = generation
   const usage = await $.session.usage({ breakdown: detail })
   const now = await $.clock.now()
-  const next = toSnapshot(usage.context, detail, now, usage)
+  const { seed } = await read($, live)
+  // Until its first response a resumed conversation has no fill of its own:
+  // the transcript's last one stands in, not the estimate
+  const context = usage.context.tokens === undefined && seed !== null ? { ...usage.context, tokens: seed, percent: undefined } : usage.context
+  const next = toSnapshot(context, detail, now, usage)
   const scale = detail === 'full' ? scaleOf(next) : undefined
+  if (gen !== generation) return
   await patch($, l => ({
     snapshot: next,
     stats: { ...l.stats, peak: Math.max(l.stats.peak, next.tokens) },
@@ -159,8 +186,10 @@ const refresh = async ($: EngineInterface, detail: Snapshot['detail']) => {
 
 // The tool results still in the conversation, biggest first
 const scan = async ($: EngineInterface, messages?: readonly SessionMessage[]) => {
+  const gen = generation
   const all = messages ?? (await $.session.messages())
   const cwd = await $.session.cwd().catch(() => '')
+  if (gen !== generation) return
   index.update(all, cwd)
   const fresh = requestsOf(all).length === 0
   await patch($, () => ({ eaters: index.top(5), fresh }))
@@ -171,6 +200,38 @@ const scan = async ($: EngineInterface, messages?: readonly SessionMessage[]) =>
 const remeasure = ($: EngineInterface, detail: Snapshot['detail'] = 'summary') => {
   void refresh($, detail).catch(() => undefined)
   void scan($).catch(() => undefined)
+}
+
+// The breakdown and the eaters as a turn goes: one reading at a time, and
+// the responses that land meanwhile fold into one more
+let reading = false
+let readAgain = false
+const readSoon = async ($: EngineInterface) => {
+  if (reading) {
+    readAgain = true
+    return
+  }
+  reading = true
+  try {
+    do {
+      readAgain = false
+      await Promise.all([refresh($, 'summary').catch(() => undefined), scan($).catch(() => undefined)])
+    } while (readAgain)
+  } finally {
+    reading = false
+  }
+}
+
+// A main-thread response came back: session.measure waits for the turn's
+// end, so a turn of many tool calls would hold the opening figures until
+// then. The fill and the cache clock move now, the rest is read behind.
+const stepped = async ($: EngineInterface) => {
+  const { context } = await $.session.usage()
+  const at = await $.clock.now()
+  // Each request rewrites the cache, so a long turn never lets it go cold
+  await patch($, l => ({ ...filled(l, context), lastReply: at, warned: { ...l.warned, cold: false } }))
+  // The grid keeps /context's own count, recounted at most once a minute
+  if ((await isOpen($)) && !(await read($, storage))) await readSoon($)
 }
 
 // A compaction's conversation is installed only once its hook chain returns,
@@ -188,6 +249,18 @@ const settle = async ($: EngineInterface, before?: number, after?: number) => {
     }))
   }
   $.clock.after(500, () => remeasure($))
+}
+
+// The conversation was replaced: readings of the old one still in flight are
+// dropped, and the figures start over (from what is known of the new one)
+const restart = async ($: EngineInterface, from: Partial<Live> = {}) => {
+  generation++
+  reading = false
+  readAgain = false
+  measuring = false
+  await update($, live, () => ({ ...FRESH, ...from }))
+  await closePicker($)
+  remeasure($)
 }
 
 // What compactions took out of the transcript, kept per session in the store
@@ -342,9 +415,13 @@ const loadGuards = async ($: EngineInterface) => {
   if (kept.length !== all.length || all.some(g => g.at === undefined)) await saveGuards($, () => kept)
 }
 
-const guardPressed = async ($: EngineInterface) => {
-  const g = nextGuard(scaled(await read($, live)), await read($, guards))
-  if (!g) return
+const guardPressed = async ($: EngineInterface, quality: number) => {
+  const g = nextGuard(shownEaters(await read($, live), quality), await read($, guards))
+  // The button stays drawn, dim, when there is nothing to guard
+  if (!g) {
+    $.ui.toast('Nothing to guard yet: a guard takes a large whole-file Read or Bash output', { timeoutMs: 5_000 })
+    return
+  }
   const at = await $.clock.now()
   await saveGuards($, gs => [...gs, { ...g, at, hits: 0 }])
   $.ui.toast(
@@ -502,6 +579,15 @@ const measureOnce = async ($: EngineInterface) => {
   }
 }
 
+// The desktop app draws the pane in a proportional font, where glyphs run
+// wider than the cells the layout counts; asked once, it does not change
+let desktop: Promise<boolean> | undefined
+const isDesktop = ($: EngineInterface) =>
+  (desktop ??= $.env
+    .get('CLAUDE_CODE_ENTRYPOINT')
+    .then(v => v === 'claude-desktop')
+    .catch(() => false))
+
 export const register: Register = (on, options) => {
   const quality = typeof options.qualityBudget === 'number' && options.qualityBudget >= 0 ? options.qualityBudget : 250_000
   const smartCompact = options.smartCompact !== false
@@ -523,10 +609,7 @@ export const register: Register = (on, options) => {
   // A conversation that replaced the last one (/clear, /resume) starts the
   // running figures over and is measured at once, not at its first reply
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear' || e.reason === 'resume') {
-      await update($, live, () => FRESH)
-      await closePicker($)
-    }
+    if (e.reason === 'clear' || e.reason === 'resume') await restart($)
     return next(e)
   })
 
@@ -602,19 +685,7 @@ export const register: Register = (on, options) => {
   on('session.measure', async ($, e, next) => {
     if (e.changed.includes('context')) {
       const tokens = e.context.tokens
-      if (tokens !== undefined) {
-        // The first turn counts from the opening measurement
-        await patch($, l => {
-          const prev = l.last ?? l.snapshot?.tokens ?? null
-          return {
-            delta: prev === null ? 0 : tokens - prev,
-            last: tokens,
-            history: [...l.history, tokens].slice(-HISTORY),
-            snapshot: l.snapshot === null ? null : { ...l.snapshot, tokens, percent: e.context.percent ?? percentOf(tokens, l.snapshot.window) },
-            stats: { ...l.stats, peak: Math.max(l.stats.peak, tokens) },
-          }
-        })
-      }
+      if (tokens !== undefined) await patch($, l => ({ ...filled(l, e.context), history: [...l.history, tokens].slice(-HISTORY) }))
       if (await isOpen($)) {
         // The grid stands for /context, so it keeps /context's own count, taken
         // again now and then; the list is redrawn from the free estimate
@@ -649,12 +720,28 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // Remembers where this session's transcript is, for the resume list
+  // Remembers where this session's transcript is, for the resume list. A
+  // resumed conversation is in place by now, where session.end saw the old
+  // one: the figures start over from it, its fill and its cache age taken
+  // from the transcript until its first response reports its own
   on('classic.SessionStart', async ($, e, next) => {
     const path = (e as { transcript_path?: unknown }).transcript_path
     if (typeof path === 'string' && path.includes('/')) transcriptDir = path.slice(0, path.lastIndexOf('/'))
+    if (e.source === 'resume' || e.source === 'fork' || e.source === 'clear') {
+      const tokens = typeof e.context_tokens === 'number' && e.context_tokens > 0 ? e.context_tokens : null
+      const since = typeof e.seconds_since_last_response === 'number' ? e.seconds_since_last_response : undefined
+      const now = await $.clock.now()
+      await restart($, {
+        seed: tokens,
+        last: tokens,
+        history: tokens === null ? [] : [tokens],
+        lastReply: since === undefined ? null : now - since * 1000,
+        warned: { ...FRESH.warned, cold: e.prompt_cache_likely_expired === true },
+      })
+      settle($)
+    }
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 
   // The first message ends the chance to resume: the button goes, and a list
   // still open closes
@@ -663,6 +750,22 @@ export const register: Register = (on, options) => {
     await closePicker($)
     return next(e)
   }).catch(($, e, next) => next(e))
+
+  // A turn's growth counts from where the context stood as it began, whatever
+  // measures in between (a rate-limit window moving, the session's first);
+  // the last turn's leaves the bar's end as this one starts
+  on('turn.start', async ($, e, next) => {
+    await patch($, l => ({ last: l.snapshot?.tokens ?? l.last, delta: 0 }))
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // Each response of the main thread moves the pane, not only the turn's end;
+  // the stream passes through untouched and nothing waits on the reading
+  on('turn.step', async function* ($, e, next) {
+    const result = yield* next(e)
+    if (!e.agentId && result.usage !== null) void stepped($).catch(() => undefined)
+    return result
+  })
 
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
@@ -715,6 +818,7 @@ export const register: Register = (on, options) => {
       picker: await read($, picker),
       now: Math.max(await read($, tick), await $.clock.now()),
       columns: e.props.bodyColumns,
+      desktop: await isDesktop($),
       rows: e.props.placement === 'dock' ? e.props.scroll?.bodyRows : undefined,
       quality,
       ttl: ttlOf(options, l.snapshot),
@@ -727,7 +831,7 @@ export const register: Register = (on, options) => {
       {
         compact: () => void compact($),
         handoff: () => void handoffPressed($),
-        guard: () => void guardPressed($).catch(() => undefined),
+        guard: () => void guardPressed($, quality).catch(() => undefined),
         toggleExpanded: () => void update($, expanded, v => !v),
         toggleStorage: () => {
           void update($, storage, v => !v)

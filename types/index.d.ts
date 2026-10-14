@@ -56,6 +56,8 @@ export type Stats = { peak: number; compactions: number; colds: number }
 // lands (and redraws the pane) at once. /clear and /resume start it over.
 export type Live = {
   snapshot: Snapshot | null
+  // How far the running (or last) turn has grown the context, from `last`:
+  // where the context stood as that turn began. Zero as a turn starts
   delta: number
   last: number | null
   // Context after each turn, oldest first
@@ -73,6 +75,10 @@ export type Live = {
   // Whether nobody has typed anything in this conversation yet; null until
   // the transcript has been read. Only a fresh conversation offers a resume.
   fresh: boolean | null
+  // A resumed conversation's fill as its transcript last reported it: the
+  // engine has none until the first response, and its estimate may be taken
+  // before the conversation is in place. Dropped once a response reports one.
+  seed: number | null
 }
 
 // A past session of this project, as the resume list shows it
