@@ -172,8 +172,8 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     if (!Svg) return undefined
     const W = Math.max(160, d.columns * 10)
     // Room above and below the bar for the swell
-    const BH = 10
-    const H = 30
+    const BH = 20
+    const H = 34
     const top = (H - BH) / 2
     const span = Math.max(snap.window, snap.tokens, 1)
     const x = (tokens: number) => Math.max(0, Math.min(W, (tokens / span) * W))
@@ -217,7 +217,7 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     // (kx) and taller (ky) the nearer it is, falling off as the Dock's icons do;
     // the columns beyond move out by the width the swell gained
     const kx = [3, 2.6, 2, 1.5, 1.2]
-    const ky = [2.4, 2.1, 1.7, 1.35, 1.1]
+    const ky = [1.6, 1.45, 1.3, 1.15, 1.05]
     const K = kx.length - 1
     // How far the column `j` steps from the pointer's moves: half the pointer's
     // column's gain, all of the gains between, and half its own
@@ -259,7 +259,7 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     const source =
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
       `<style>${css}</style>` +
-      `<defs><clipPath id="r"><rect width="${W}" height="${BH}" rx="5" ry="5"/></clipPath>${bar}</defs>` +
+      `<defs><clipPath id="r"><rect width="${W}" height="${BH}" rx="${BH / 2}" ry="${BH / 2}"/></clipPath>${bar}</defs>` +
       `${columns}</svg>`
     return (
       <Box width="100%">

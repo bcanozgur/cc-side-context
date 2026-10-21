@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.2 · 2026-10-22
+
+- Desktop app: the context bar is twice as thick (20px), its ends fully round; the swell under the pointer grows it less tall (1.6×, was 2.4×) so the meter takes little more room, and as much wider as before.
+
 ## 0.8.1 · 2026-10-22
 
 **Desktop app: the meter magnifies under the pointer**
