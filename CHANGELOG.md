@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.1 · 2026-10-22
+
+**Desktop app: the meter magnifies under the pointer**
+
+- Hovering the context bar swells it as the macOS Dock does: the stretch under the pointer grows wider and taller, its neighbours less so, the rest moves aside, so a part of a pixel or two (the system prompt, Skills, MCP) reads at a glance. No click; it settles back when the pointer leaves.
+- Resting the pointer names what is under it and its size (`Conversation 280.9k`), and says when that stretch is past the limit.
+
 ## 0.8.0 · 2026-10-20
 
 **Desktop app: the pane rebuilt for the page**

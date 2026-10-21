@@ -163,49 +163,113 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
 
   // The meter is the whole window, as the host's own context bar: each part in
   // its colour, the latest turn a lighter stretch of the conversation, and the
-  // limit the pane warns at a mark on it, the room past the mark a fainter track
+  // limit the pane warns at a separator on it, the room past it a fainter track.
+  // Under the pointer it swells as the macOS Dock does: the bar is cut into thin
+  // columns, the one under the pointer and its neighbours drawn wider and taller
+  // and the rest pushed aside, so a sliver of a part grows readable. The frame
+  // runs no script, so the swell is CSS :hover on the columns, not a position
   const meter = () => {
     if (!Svg) return undefined
-    const VW = 1000
-    const VH = 10
+    const W = Math.max(160, d.columns * 10)
+    // Room above and below the bar for the swell
+    const BH = 10
+    const H = 30
+    const top = (H - BH) / 2
     const span = Math.max(snap.window, snap.tokens, 1)
-    const x = (tokens: number) => Math.max(0, Math.min(VW, (tokens / span) * VW))
+    const x = (tokens: number) => Math.max(0, Math.min(W, (tokens / span) * W))
     // The rows are an estimate of the same whole: scaled to the measured total
     const ratio = total > 0 ? snap.tokens / total : 0
     const turn = Math.max(0, Math.min(d.live.delta, (conversation?.tokens ?? 0) * ratio))
     const parts = [
-      ...setup.map(r => ({ tokens: r.tokens * ratio, color: colorOf(r.name), opacity: 1 })),
-      ...(conversation ? [{ tokens: conversation.tokens * ratio - turn, color: colorOf(conversation.name), opacity: 1 }] : []),
-      ...(conversation && turn > 0 ? [{ tokens: turn, color: colorOf(conversation.name), opacity: 0.5 }] : []),
+      ...setup.map(r => ({ name: labelOf(r.name), tokens: r.tokens * ratio, color: colorOf(r.name), opacity: 1 })),
+      ...(conversation ? [{ name: 'Conversation', tokens: conversation.tokens * ratio - turn, color: colorOf(conversation.name), opacity: 1 }] : []),
+      ...(conversation && turn > 0 ? [{ name: 'Latest turn', tokens: turn, color: colorOf(conversation.name), opacity: 0.5 }] : []),
     ].filter(p => p.tokens > 0)
     let at = 0
-    const rects = parts
-      .map(p => {
-        const from = at
-        at += p.tokens
-        // A part of 1k or more is never thinner than a sliver
-        const w = Math.max(p.tokens >= 1_000 ? 3 : 0, x(at) - x(from))
-        return `<rect x="${x(from).toFixed(1)}" y="0" width="${w.toFixed(1)}" height="${VH}" fill="${p.color}" fill-opacity="${p.opacity}"/>`
-      })
+    const spans = parts.map(p => {
+      const from = at
+      at += p.tokens
+      // A part of 1k or more is never thinner than a sliver
+      return { ...p, from: x(from), w: Math.max(p.tokens >= 1_000 ? 1.5 : 0, x(at) - x(from)) }
+    })
+    const rects = spans
+      .map(p => `<rect x="${p.from.toFixed(1)}" width="${p.w.toFixed(1)}" height="${BH}" fill="${p.color}" fill-opacity="${p.opacity}"/>`)
       .join('')
     const isMarked = budget < span
     const mark = x(budget)
     // Whatever runs past the mark keeps its part colours under a faint red veil,
     // so the list's colours still read and the overage still shows
-    const over = snap.tokens > budget && isMarked ? `<rect x="${mark.toFixed(1)}" y="0" width="${(x(snap.tokens) - mark).toFixed(1)}" height="${VH}" fill="${HEX.error}" fill-opacity="0.35"/>` : ''
-    const source =
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VW} ${VH}" preserveAspectRatio="none">` +
-      `<defs><clipPath id="r"><rect width="${VW}" height="${VH}" rx="5" ry="5"/></clipPath></defs>` +
-      `<g clip-path="url(#r)"><rect width="${VW}" height="${VH}" fill="#80808033"/>` +
-      (isMarked ? `<rect x="${mark.toFixed(1)}" width="${(VW - mark).toFixed(1)}" height="${VH}" fill="#80808014"/>` : '') +
+    const over = snap.tokens > budget && isMarked ? `<rect x="${mark.toFixed(1)}" width="${(x(snap.tokens) - mark).toFixed(1)}" height="${BH}" fill="${HEX.error}" fill-opacity="0.35"/>` : ''
+    const bar =
+      `<g id="bar" clip-path="url(#r)"><rect width="${W}" height="${BH}" fill="#80808033"/>` +
+      (isMarked ? `<rect x="${mark.toFixed(1)}" width="${(W - mark).toFixed(1)}" height="${BH}" fill="#80808014"/>` : '') +
       `${rects}${over}` +
       // The mark is a separator: a dark gap with a light line down its middle,
       // so it reads against any part colour on either side
-      (isMarked ? `<rect x="${(mark - 4).toFixed(1)}" width="8" height="${VH}" fill="#000000" fill-opacity="0.6"/><rect x="${(mark - 1.5).toFixed(1)}" width="3" height="${VH}" fill="#e6e6e6"/>` : '') +
-      `</g></svg>`
+      (isMarked ? `<rect x="${(mark - 2).toFixed(1)}" width="4" height="${BH}" fill="#000000" fill-opacity="0.6"/><rect x="${(mark - 0.75).toFixed(1)}" width="1.5" height="${BH}" fill="#e6e6e6"/>` : '') +
+      `</g>`
+
+    // Whole-pixel columns that tile edge to edge: overlapping slices would
+    // paint the translucent track twice and show as seams
+    const col = 6
+    const N = Math.ceil(W / col)
+    // The swell: the column under the pointer and four on each side, each wider
+    // (kx) and taller (ky) the nearer it is, falling off as the Dock's icons do;
+    // the columns beyond move out by the width the swell gained
+    const kx = [3, 2.6, 2, 1.5, 1.2]
+    const ky = [2.4, 2.1, 1.7, 1.35, 1.1]
+    const K = kx.length - 1
+    // How far the column `j` steps from the pointer's moves: half the pointer's
+    // column's gain, all of the gains between, and half its own
+    const shift = (j: number) => {
+      const gain = (k: number) => (kx[k] ?? 1) - 1
+      let s = gain(0) / 2
+      for (let m = 1; m < j; m++) s += gain(m)
+      return ((s + gain(j) / 2) * col).toFixed(1)
+    }
+    const swell = (sel: string, j: number, dx: string) =>
+      `${sel} .s{transform:translateX(${dx}px) scale(${kx[j] ?? 1},${ky[j] ?? 1})}`
+    // Columns after the pointer's by sibling order, those before it by :has
+    const css =
+      `.s{transition:transform .14s ease-out}` +
+      swell('.c:hover', 0, '0') +
+      Array.from({ length: K }, (_, m) => {
+        const j = m + 1
+        return swell(`.c:hover${'+.c'.repeat(j)}`, j, shift(j)) + swell(`.c:has(${'+.c'.repeat(j)}:hover)`, j, `-${shift(j)}`)
+      }).join('') +
+      swell(`.c:hover${'+.c'.repeat(K)}~.c`, K + 1, shift(K + 1)) +
+      swell(`.c:has(~.c${'+.c'.repeat(K)}:hover)`, K + 1, `-${shift(K + 1)}`)
+    // What sits under a column's middle, for its tooltip
+    const partAt = (px: number) => {
+      const p = spans.find(s => px >= s.from && px < s.from + s.w)
+      const name = p ? `${p.name} ${fmt(p.tokens)}` : 'Free'
+      return isMarked && px >= mark ? `${name} · past the ${limitLabel}` : name
+    }
+    const columns = Array.from({ length: N }, (_, i) => {
+      const left = i * col
+      const mid = left + col / 2
+      return (
+        `<clipPath id="k${i}"><rect x="${left}" width="${col}" height="${BH}" shape-rendering="crispEdges"/></clipPath>` +
+        `<g class="c"><title>${partAt(mid)}</title>` +
+        `<rect x="${left}" width="${col}" height="${H}" fill="#000" fill-opacity="0"/>` +
+        `<g class="s" style="transform-origin:${mid}px ${H / 2}px">` +
+        `<g transform="translate(0 ${top})"><use href="#bar" clip-path="url(#k${i})"/></g></g></g>`
+      )
+    }).join('')
+    const source =
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
+      `<style>${css}</style>` +
+      `<defs><clipPath id="r"><rect width="${W}" height="${BH}" rx="5" ry="5"/></clipPath>${bar}</defs>` +
+      `${columns}</svg>`
     return (
-      <Box width="100%" marginY={1}>
-        <Svg source={source} alt={`${windowShare}% of the ${fmt(snap.window)} window in use${isMarked ? `, ${limitLabel} marked at ${fmt(budget)}` : ''}`} width={Math.max(160, d.columns * 10)} height={8} />
+      <Box width="100%">
+        <Svg
+          source={source}
+          alt={`${windowShare}% of the ${fmt(snap.window)} window in use${isMarked ? `, ${limitLabel} marked at ${fmt(budget)}` : ''}`}
+          width={W}
+          height={H}
+          isInteractive
+        />
       </Box>
     )
   }
