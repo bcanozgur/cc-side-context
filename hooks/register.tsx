@@ -23,6 +23,7 @@ import {
   toolTokens,
   widthOf,
 } from './analysis'
+import { drawWebPane } from './pane-web'
 import { TITLE, drawPane, glyphOf, nextGuard, scaled, shownEaters, top } from './pane'
 
 export { fmt }
@@ -513,7 +514,17 @@ const compact = async ($: EngineInterface) => {
       $.ui.toast(before !== undefined && after !== undefined ? `Compacted ${fmt(before)} → ${fmt(after)}; decisions and changed files kept` : 'Compacted')
     }
   } catch (err) {
-    $.ui.toast(`Compaction failed: ${reasonOf(err)}`, { timeoutMs: 10_000 })
+    // The desktop app runs a headless session, where compaction only exists as a
+    // /compact command. Run it as if typed; the hook below adds the keep-list.
+    if (/headless/i.test(reasonOf(err))) {
+      try {
+        $.ui.toast('Compacting with the keep-list…')
+        await $.command.run({ command: 'compact' })
+      } catch (err2) {
+        await $.ui.copy({ text: '/compact' }).catch(() => undefined)
+        $.ui.toast(`Could not compact from the pane: ${reasonOf(err2)}. Type /compact (copied).`, { timeoutMs: 10_000 })
+      }
+    } else $.ui.toast(`Compaction failed: ${reasonOf(err)}`, { timeoutMs: 10_000 })
   } finally {
     await update($, compacting, () => false)
     await settle($, figures.before, figures.after)
@@ -819,13 +830,16 @@ export const register: Register = (on, options) => {
       now: Math.max(await read($, tick), await $.clock.now()),
       columns: e.props.bodyColumns,
       desktop: await isDesktop($),
+      surface: e.surface,
       rows: e.props.placement === 'dock' ? e.props.scroll?.bodyRows : undefined,
       quality,
       ttl: ttlOf(options, l.snapshot),
     }
     // Started once every read is in, so the figures it writes redraw the pane
     if (!l.snapshot) void measureOnce($).catch(() => undefined)
-    return drawPane(
+    // Every surface but the terminal lays the tree out as HTML, and gets the page's own layout
+    const draw = data.desktop || e.surface !== 'terminal' ? drawWebPane : drawPane
+    return draw(
       ui,
       data,
       {

@@ -28,12 +28,12 @@ const RULES: Rule[] = [
 const ITEM_LIMIT = { memory: 3_000, mcp: 1_500, skills: 800 } as const
 
 // The bar's parts, and the marks of the In context rows they stand for
-const SETUP_COLOR: Color = 'suggestion'
-const CONVERSATION_COLOR: Color = 'claude'
-const TURN_COLOR: Color = 'text'
+export const SETUP_COLOR: Color = 'suggestion'
+export const CONVERSATION_COLOR: Color = 'claude'
+export const TURN_COLOR: Color = 'text'
 
-const ruleOf = (name: string): Rule | undefined => RULES.find(r => r.test.test(name.replace(/\s*\(deferred\)\s*$/i, '')))
-const labelOf = (name: string) => ruleOf(name)?.label ?? name.replace(/\s*\(deferred\)\s*$/i, '')
+export const ruleOf = (name: string): Rule | undefined => RULES.find(r => r.test.test(name.replace(/\s*\(deferred\)\s*$/i, '')))
+export const labelOf = (name: string) => ruleOf(name)?.label ?? name.replace(/\s*\(deferred\)\s*$/i, '')
 
 // Where the pane starts to worry: auto-compact, or sooner the quality budget,
 // past which long conversations tend to lose track of early details
@@ -43,7 +43,7 @@ export const budgetOf = (snap: Pick<Snapshot, 'compactAt' | 'window'>, quality: 
 }
 
 // Conversation is "too big" once it holds over half of the budget
-const isHeavy = (r: Row, snap: Snapshot, quality: number): boolean => {
+export const isHeavy = (r: Row, snap: Snapshot, quality: number): boolean => {
   if (r.kind !== 'used') return false
   if (/^messages/i.test(r.name)) return r.tokens > budgetOf(snap, quality) * 0.5
   const limit = ruleOf(r.name)?.limit
@@ -82,6 +82,9 @@ export type PaneData = {
   columns: number
   // Drawn in the desktop app, whose proportional font runs glyphs wider than a cell
   desktop?: boolean
+  // The surface drawing it: every one but the terminal lays the tree out as
+  // HTML, and gets the page's own layout (pane-web.tsx)
+  surface?: string
   // The rows a docked pane has, so the actions can sit at its foot
   rows?: number
   quality: number
@@ -101,7 +104,7 @@ export type PaneActions = {
   pick: (id: string) => void
 }
 
-type Ui = ReturnType<EngineInterface['ui']['resolve']>
+export type Ui = ReturnType<EngineInterface['ui']['resolve']>
 
 export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneActions) => {
   // The pane's full body, so dragging the divider either way moves the right

@@ -157,26 +157,68 @@ test('draws the breakdown on every surface', async ($, on) => {
     })
     const drawn = JSON.stringify(await pane.drawn())
     expect(drawn).toContain('84.0k')
-    // the bar is the whole window, with auto-compact a mark on it and the room before it
-    expect(drawn).toContain(' / 200.0k window')
-    expect(drawn).toContain(' 42%')
-    expect(drawn).toContain('auto-compact 167.0k')
     expect(drawn).toContain('83.0k left')
-    expect(drawn).toContain('┃')
-    // its key, in the colours of the In context rows
-    expect(drawn).toContain('["setup"]')
-    expect(drawn).toContain('["conversation"]')
-    expect(drawn).not.toContain('["turn"]')
-    // full labels, not clipped; one "(deferred)" at most; Skills flagged
-    expect(drawn).toContain('System prompt')
     expect(drawn).toContain('Conversation')
+    expect(drawn).toContain('Skills')
     expect(drawn).not.toContain('(deferred) (deferred)')
-    // an estimate only raises the question; the exact count answers it
-    expect(drawn).toContain('may be large')
     expect(drawn).not.toContain('Exact count')
-    expect(drawn).toContain('Disable unused plugins in /plugin')
+    if (surface === 'terminal') {
+      // the bar is the whole window, with auto-compact a mark on it and the room before it
+      expect(drawn).toContain(' / 200.0k window')
+      expect(drawn).toContain(' 42%')
+      expect(drawn).toContain('auto-compact 167.0k')
+      expect(drawn).toContain('┃')
+      // its key, in the colours of the In context rows
+      expect(drawn).toContain('["setup"]')
+      expect(drawn).toContain('["conversation"]')
+      expect(drawn).not.toContain('["turn"]')
+      // full labels, not clipped; an estimate only raises the question
+      expect(drawn).toContain('System prompt')
+      expect(drawn).toContain('may be large')
+      expect(drawn).toContain('Disable unused plugins in /plugin')
+    } else {
+      // laid out by the page at the slot's width, never in counted cells
+      expect(drawn).toContain('"width":"100%"')
+      expect(drawn).toContain('"minWidth":0')
+      // the verdict, a meter over the whole window with the limit marked on it
+      expect(drawn).toContain('Filling up')
+      expect(drawn).toContain('"type":"Svg"')
+      expect(drawn).toContain('42% of the 200.0k window in use, auto-compact marked at 167.0k')
+      expect(drawn).toContain('84.0k of 200.0k window')
+      expect(drawn).toContain('Auto-compact 167.0k')
+      // every part in a colour of its own, the same on its dot and its stretch of the meter
+      expect(drawn).toContain('#3fa877')
+      expect(drawn).toContain('#d9a521')
+      expect(drawn).toContain('#9a72d8')
+      expect(drawn).not.toContain('"suggestion"')
+      // one fact per row, with its share of what is in context
+      expect(drawn).toContain('System prompt')
+      expect(drawn).toContain('["84%"]')
+      // an estimate neither flags a row nor gives a fix: the next step offers the count
+      expect(drawn).not.toContain('Disable unused plugins in /plugin')
+      expect(drawn).toContain('Sizes are estimates')
+      expect(drawn.match(/"variant":"primary"/g)?.length).toBe(1)
+      expect(drawn).toContain('Count exactly')
+    }
     await pane.unmount()
   }
+})
+
+test('on the page the exact count flags a row, its fix under the pointer', async ($, on) => {
+  engine(on)
+  await $.session.start(START)
+  await $.command.run(run('full'))
+  const pane = await $.ui.mount({
+    plugin: 'cc-side-context',
+    surface: 'desktop',
+    component: 'Pane',
+    requestId: PANE,
+    props: { title: 'Context', isFocused: false, bodyColumns: 40, placement: 'dock' } as never,
+  })
+  const drawn = JSON.stringify(await pane.drawn())
+  expect(drawn).toContain('Disable unused plugins in /plugin')
+  expect(drawn).toContain('"display":"none"')
+  expect(drawn).not.toContain('Sizes are estimates')
 })
 
 const mount = ($: Parameters<TestBody>[0]) =>
@@ -421,6 +463,27 @@ test('on a 1M window the bar is the whole window, the quality limit a mark on it
   // every part the key names has a cell, small as it is on this scale
   for (const part of ['setup', 'conversation', 'turn']) expect(drawn).toContain(`["${part}"]`)
   expect(drawn).toContain('+4.7k')
+})
+
+test('on the page a 1M window fills the whole bar, the quality limit marked on it', async ($, on) => {
+  engine(on, { ...big, context: { ...big.context, tokens: 64_000, percent: 6 } })
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  const pane = await $.ui.mount({
+    plugin: 'cc-side-context',
+    surface: 'desktop',
+    component: 'Pane',
+    requestId: PANE,
+    props: { title: 'Context', isFocused: false, bodyColumns: 40, placement: 'dock' } as never,
+  })
+  const drawn = JSON.stringify(await pane.drawn())
+  expect(drawn).toContain('64.0k of 1.0M window')
+  expect(drawn).toContain('["6%"]')
+  expect(drawn).toContain('Quality limit 250.0k')
+  expect(drawn).toContain('186.0k left')
+  expect(drawn).toContain('6% of the 1.0M window in use, quality limit marked at 250.0k')
+  // the mark sits a quarter of the way along
+  expect(drawn).toContain('x=\\"248.0\\" width=\\"4\\"')
 })
 
 test('with auto-compact off the bar counts towards the window', async ($, on) => {

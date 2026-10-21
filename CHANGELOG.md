@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0 · 2026-10-20
+
+**Desktop app: the pane rebuilt for the page**
+
+The desktop app (and every surface but the terminal) draws the pane as HTML in a proportional font. The terminal layout, sized in counted cells, ran past the pane's edge there and read as a wall of text. Those surfaces now get a layout of their own (`hooks/pane-web.tsx`); the terminal pane is unchanged.
+
+- **One fact per row.** In context and Biggest outputs list a dot in the part's colour, the name, the size and its share (`Conversation  14.9k  23%`), the numbers flush right at any width. No advice lines under the rows: a row's fix shows under the pointer.
+- **The meter is the whole window.** The summary is the verdict (`● Healthy`) and the share of the window in use; a slim rounded meter spans the window (1M on a 1M plan, as the host's own bar does), each part in its colour, the latest turn a lighter stretch of the conversation, and the quality limit (or auto-compact) a separator on it; past it the parts keep their colours under a faint red veil. Under it `64.0k of 1.0M window`, then `┃ Quality limit 250.0k · 186.0k left`, then the turn's growth, the cache and the plan limits on one quiet line.
+- **A colour per part.** Built-in tools blue, MCP tools orange, the conversation green, the system prompt amber (the host's own hues), Skills violet, MCP instructions pink, Memory teal: the dot of each In context row matches its stretch of the meter.
+- **One next step.** When there is something to do, a few words and one primary button (`Sizes are estimates` · **Count exactly**, `Compact keeps your goal and decisions` · **Compact**); otherwise nothing. The other actions sit at the foot as secondary buttons; Guard only when there is something to guard.
+- **No alarms from estimates.** Only the exact count flags a row (its size in red); an estimate shows plain sizes, marked `~` on the total.
+- **Show more where it applies.** Each card shows its biggest rows (six, three for outputs) and opens the rest with its own *Show N more*, which also brings in Memory files, MCP tools and Skills.
+- Neutral frames: colour is kept for the data and the status dot.
+
+**Fixes**
+
+- Compacting from the pane in the desktop app, whose session is headless, runs `/compact` as if typed; the keep-list is still added.
+
 ## 0.6.1 · 2026-10-14
 
 **Fixes**
