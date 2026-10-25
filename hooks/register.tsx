@@ -25,6 +25,7 @@ import {
 } from './analysis'
 import { drawWebPane } from './pane-web'
 import { TITLE, drawPane, glyphOf, nextGuard, scaled, shownEaters, top } from './pane'
+import { drawStrip } from './strip'
 
 export { fmt }
 
@@ -73,6 +74,8 @@ const tick = atom({ plugin: 'cc-side-context', key: 'tick' } as const, 0)
 const compacting = atom({ plugin: 'cc-side-context', key: 'compacting' } as const, false)
 const guards = atom({ plugin: 'cc-side-context', key: 'guards' } as const, [])
 const picker = atom({ plugin: 'cc-side-context', key: 'picker' } as const, { state: 'closed' } as Picker)
+// Mirrors whether the pane is open, so the strip's button redraws when it changes
+const paneOpen = atom({ plugin: 'cc-side-context', key: 'paneOpen' } as const, false)
 
 // Several figures change together: they land in one write, one redraw
 const patch = ($: EngineInterface, fn: (l: Live) => Partial<Live>) => update($, live, l => ({ ...l, ...fn(l) }))
@@ -203,11 +206,18 @@ const remeasure = ($: EngineInterface, detail: Snapshot['detail'] = 'summary') =
   void scan($).catch(() => undefined)
 }
 
+// The strip above the prompt has drawn the meter: its parts come from the
+// breakdown, which is read on while it shows, the pane closed or not
+let stripShown = false
+
 // The breakdown and the eaters as a turn goes: one reading at a time, and
-// the responses that land meanwhile fold into one more
+// the responses that land meanwhile fold into one more. The strip alone
+// shows no eaters, so it reads the breakdown without them
 let reading = false
 let readAgain = false
-const readSoon = async ($: EngineInterface) => {
+let readEaters = false
+const readSoon = async ($: EngineInterface, eaters = true) => {
+  readEaters ||= eaters
   if (reading) {
     readAgain = true
     return
@@ -216,7 +226,9 @@ const readSoon = async ($: EngineInterface) => {
   try {
     do {
       readAgain = false
-      await Promise.all([refresh($, 'summary').catch(() => undefined), scan($).catch(() => undefined)])
+      const withEaters = readEaters
+      readEaters = false
+      await Promise.all([refresh($, 'summary').catch(() => undefined), withEaters ? scan($).catch(() => undefined) : undefined])
     } while (readAgain)
   } finally {
     reading = false
@@ -232,7 +244,9 @@ const stepped = async ($: EngineInterface) => {
   // Each request rewrites the cache, so a long turn never lets it go cold
   await patch($, l => ({ ...filled(l, context), lastReply: at, warned: { ...l.warned, cold: false } }))
   // The grid keeps /context's own count, recounted at most once a minute
-  if ((await isOpen($)) && !(await read($, storage))) await readSoon($)
+  const open = await isOpen($)
+  if (open && !(await read($, storage))) await readSoon($)
+  else if (!open && stripShown) await readSoon($, false)
 }
 
 // A compaction's conversation is installed only once its hook chain returns,
@@ -375,14 +389,24 @@ const pick = async ($: EngineInterface, id: string) => {
 
 const isOpen = async ($: EngineInterface) => (await $.ui.panes()).some(p => p.id === PANE)
 
-const show = async ($: EngineInterface) => {
+// The strip learns of the pane opening and closing here, and of the person's
+// own close mark from `ui.close`
+const open = async ($: EngineInterface) => {
   await $.ui.open({ id: PANE, title: TITLE })
+  await update($, paneOpen, () => true)
+}
+
+const show = async ($: EngineInterface) => {
+  await open($)
   await refresh($, 'summary')
   await scan($)
 }
 
 // Hiding lasts for this session only: every new session opens the pane again
-const hide = ($: EngineInterface) => $.ui.close({ id: PANE })
+const hide = async ($: EngineInterface) => {
+  await $.ui.close({ id: PANE })
+  await update($, paneOpen, () => false)
+}
 
 // The prompt cache lasts five minutes on an API key and an hour on a
 // subscription; a subscription is the session that reports rate limits
@@ -565,6 +589,7 @@ const onTick = async ($: EngineInterface, options: PluginOptions) => {
   const snap = l.snapshot
   if (!snap) {
     if (open) remeasure($)
+    else if (stripShown) void readSoon($, false)
     return
   }
   const at = l.lastReply
@@ -610,7 +635,9 @@ export const register: Register = (on, options) => {
       argumentHint: '[on|off|full|compact|handoff|stats|guards [clear]]',
     })
     await loadGuards($).catch(() => undefined)
-    void $.ui.open({ id: PANE, title: TITLE })
+    // The terminal docks the pane; everywhere else the strip above the prompt
+    // shows the context, and the pane opens from it
+    if (e.surface === 'terminal' && !(await isDesktop($))) void open($)
     remeasure($)
     $.clock.every(30_000, () => void onTick($, options).catch(() => undefined))
 
@@ -704,6 +731,8 @@ export const register: Register = (on, options) => {
         const now = await $.clock.now()
         if (!(await read($, storage))) void refresh($, 'summary').catch(() => undefined)
         else if (l.exactAt === null || now - l.exactAt >= EXACT_EVERY) void refresh($, 'full').catch(() => undefined)
+      } else if (stripShown) {
+        void readSoon($, false)
       }
 
       // One warning on crossing the quality budget, again only after dropping back
@@ -815,6 +844,42 @@ export const register: Register = (on, options) => {
     const deny = await guardCall($, { tool: 'Bash', input: e as unknown as Record<string, unknown> })
     return deny ? { deny } : next(e)
   }).catch(($, e, next) => next(e))
+
+  // The person's close mark
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    const result = await next(e)
+    await update($, paneOpen, () => false)
+    return result
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    stripShown = true
+    const l = await read($, live)
+    const snapshot = l.snapshot
+    const isPaneOpen = await read($, paneOpen)
+    const surface = (await isDesktop($)) ? 'desktop' : e.surface
+    // The terminal docks the pane beside the transcript, where it already
+    // shows all the strip would: the strip waits until it is closed
+    if (surface === 'terminal' && isPaneOpen) return next(e)
+    if (!snapshot) void measureOnce($).catch(() => undefined)
+    return drawStrip(
+      $.ui.resolve(e),
+      {
+        snapshot,
+        delta: l.delta,
+        compacting: await read($, compacting),
+        paneOpen: isPaneOpen,
+        quality,
+        columns: e.props.bodyColumns,
+        surface,
+      },
+      {
+        details: () => void (isPaneOpen ? hide($) : show($)).catch(() => undefined),
+        compact: () => void compact($),
+      },
+    )
+  })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const ui = $.ui.resolve(e)

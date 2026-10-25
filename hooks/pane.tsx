@@ -42,6 +42,18 @@ export const budgetOf = (snap: Pick<Snapshot, 'compactAt' | 'window'>, quality: 
   return quality > 0 ? Math.min(compact, quality) : compact
 }
 
+// The verdict the page's pane and the strip both lead with
+export const statusOf = (snap: Snapshot, quality: number, compacting: boolean): { color: Color; text: string; pressure: number } => {
+  const budget = budgetOf(snap, quality)
+  const isQualityFirst = budget < (snap.compactAt ?? snap.window)
+  const pressure = budget > 0 ? snap.tokens / budget : 0
+  if (compacting) return { color: 'claude', text: 'Compacting', pressure }
+  if (pressure >= 1) return { color: 'error', text: 'Over the limit', pressure }
+  if (pressure >= 0.8) return { color: 'error', text: isQualityFirst ? 'Time to compact' : 'Near auto-compact', pressure }
+  if (pressure >= 0.5) return { color: 'warning', text: 'Filling up', pressure }
+  return { color: 'success', text: 'Healthy', pressure }
+}
+
 // Conversation is "too big" once it holds over half of the budget
 export const isHeavy = (r: Row, snap: Snapshot, quality: number): boolean => {
   if (r.kind !== 'used') return false
@@ -70,6 +82,57 @@ export const shownEaters = (live: Pick<Live, 'eaters' | 'scale' | 'snapshot'>, q
 // The biggest eater that can be guarded and is not yet
 export const nextGuard = (eaten: readonly Parameters<typeof guardOf>[0][], gs: readonly Guard[]): Guard | undefined =>
   eaten.map(guardOf).find(g => g !== undefined && !isGuarded(gs, g))
+
+// The terminal's bar, cut into runs of one glyph and colour: what was loaded
+// at the start, the conversation, and the latest turn at its growing end,
+// then the track to the budget's mark and the pale window past it. The pane
+// and the strip above the prompt draw the same one; `parts` is its key
+export type BarRun = { glyph: string; color: Color; count: number }
+
+export const barOf = (
+  snap: Snapshot,
+  o: { setupTokens: number; change: number; budget: number; cells: number; mark: string; markColor: Color; glyph?: string; pale?: string },
+): { runs: BarRun[]; parts: { name: string; color: Color; cells: number }[] } => {
+  const { setupTokens, change, budget, cells, mark } = o
+  const glyph = o.glyph ?? '█'
+  const pale = o.pale ?? '░'
+  const span = Math.max(snap.window, snap.tokens, 1)
+  const cellsOf = (tokens: number) => Math.round((tokens / span) * cells)
+  const setupPart = Math.min(setupTokens, snap.tokens)
+  const turnPart = Math.max(0, Math.min(change, snap.tokens - setupPart))
+  const conversationPart = snap.tokens - setupPart - turnPart
+  // Each part ends where its running sum rounds to, so rounding leaves no
+  // stray cell between them; one of 1k or more gets a cell even when too
+  // small for one, so every part the key names can be seen
+  const endOf = (tokens: number, sum: number, from: number) => Math.min(cells, Math.max(tokens >= 1_000 ? from + 1 : from, cellsOf(sum)))
+  const setupEnd = endOf(setupPart, setupPart, 0)
+  const turnStart = endOf(conversationPart, setupPart + conversationPart, setupEnd)
+  const filled = endOf(turnPart, snap.tokens, turnStart)
+  const parts = [
+    { name: 'setup', color: SETUP_COLOR, cells: setupEnd },
+    { name: 'conversation', color: CONVERSATION_COLOR, cells: turnStart - setupEnd },
+    { name: 'turn', color: TURN_COLOR, cells: filled - turnStart },
+  ].filter(p => p.cells > 0)
+  // The mark has a cell of its own, never the first or the last, laid over
+  // the fill once the context is past it
+  const hasMark = budget < snap.window
+  const markAt = hasMark ? Math.min(cells - 1, Math.max(1, cellsOf(budget))) : undefined
+  const runs: BarRun[] = []
+  for (let i = 0; i < cells; i++) {
+    const [g, color]: [string, Color] =
+      i === markAt
+        ? [mark, o.markColor]
+        : i < filled
+          ? [glyph, i < setupEnd ? SETUP_COLOR : i < turnStart ? CONVERSATION_COLOR : TURN_COLOR]
+          : markAt === undefined || i < markAt
+            ? [glyph, 'subtle']
+            : [pale, 'subtle']
+    const last = runs[runs.length - 1]
+    if (last && last.glyph === g && last.color === color) last.count++
+    else runs.push({ glyph: g, color, count: 1 })
+  }
+  return { runs, parts }
+}
 
 export type PaneData = {
   live: Live
@@ -216,40 +279,7 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
   const pale = '░'
   const mark = d.desktop ? '█' : '┃'
   const cells = d.desktop ? Math.max(1, Math.floor((width * 0.95) / 1.6)) : width
-  const span = Math.max(snap.window, snap.tokens, 1)
-  const cellsOf = (tokens: number) => Math.round((tokens / span) * cells)
-  const setupPart = Math.min(setupTokens, snap.tokens)
-  const turnPart = Math.max(0, Math.min(change, snap.tokens - setupPart))
-  const conversationPart = snap.tokens - setupPart - turnPart
-  // Each part ends where its running sum rounds to, so rounding leaves no
-  // stray cell between them; one of 1k or more gets a cell even when too
-  // small for one, so every part the key names can be seen
-  const endOf = (tokens: number, sum: number, from: number) => Math.min(cells, Math.max(tokens >= 1_000 ? from + 1 : from, cellsOf(sum)))
-  const setupEnd = endOf(setupPart, setupPart, 0)
-  const turnStart = endOf(conversationPart, setupPart + conversationPart, setupEnd)
-  const filled = endOf(turnPart, snap.tokens, turnStart)
-  const parts = [
-    { name: 'setup', color: SETUP_COLOR, cells: setupEnd },
-    { name: 'conversation', color: CONVERSATION_COLOR, cells: turnStart - setupEnd },
-    { name: 'turn', color: TURN_COLOR, cells: filled - turnStart },
-  ].filter(p => p.cells > 0)
-  // The mark has a cell of its own, never the first or the last, laid over
-  // the fill once the context is past it
-  const markAt = hasMark ? Math.min(cells - 1, Math.max(1, cellsOf(budget))) : undefined
-  const runs: { glyph: string; color: Color; count: number }[] = []
-  for (let i = 0; i < cells; i++) {
-    const [g, color]: [string, Color] =
-      i === markAt
-        ? [mark, status.color]
-        : i < filled
-          ? [glyph, i < setupEnd ? SETUP_COLOR : i < turnStart ? CONVERSATION_COLOR : TURN_COLOR]
-          : markAt === undefined || i < markAt
-            ? [glyph, 'subtle']
-            : [pale, 'subtle']
-    const last = runs[runs.length - 1]
-    if (last && last.glyph === g && last.color === color) last.count++
-    else runs.push({ glyph: g, color, count: 1 })
-  }
+  const { runs, parts } = barOf(snap, { setupTokens, change, budget, cells, mark, markColor: status.color as Color })
   const room = budget - snap.tokens
 
   // Every message sends the whole conversation again: cheap while the prompt

@@ -99,6 +99,8 @@ declare module 'claude-code' {
       // This project's guards, mirrored from the store so the pane redraws
       guards: Guard[]
       picker: Picker
+      // Whether the pane is open, for the strip above the prompt
+      paneOpen: boolean
     }
   }
 }

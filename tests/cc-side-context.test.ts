@@ -1028,3 +1028,118 @@ test('a past session is named by /rename, then by Claude, then by its first prom
   expect(agoOf(30_000)).toBe('just now')
   expect(agoOf(5 * 60_000)).toBe('5m ago')
 })
+
+const strip = ($: Parameters<TestBody>[0], surface: 'terminal' | 'desktop') =>
+  $.ui.mount({
+    plugin: 'cc-side-context',
+    surface,
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns: 100 } as never,
+  })
+
+test('off the terminal the strip shows the context and opens the pane on demand', async ($, on) => {
+  const { panes, clock } = engine(on)
+  await $.session.start({ ...START, surface: 'desktop' })
+  expect(panes).toEqual([])
+
+  const band = await strip($, 'desktop')
+  await clock.settle()
+  let drawn = JSON.stringify(await band.drawn())
+  expect(drawn).toContain('Filling up')
+  expect(drawn).toContain('42%')
+  expect(drawn).toContain('84.0k of 167.0k · 83.0k left')
+  expect(drawn).toContain('"type":"Svg"')
+  // the pane's meter, smaller: each part in its colour, the lens under the
+  // pointer naming the part and its size
+  expect(drawn).toContain('"isInteractive":true')
+  expect(drawn).toContain('id=\\"lens\\"')
+  expect(drawn).toContain('#3fa877')
+  expect(drawn).toContain('#d9a521')
+  expect(drawn).toContain('#9a72d8')
+  expect(drawn).toContain('>Conversation</tspan>')
+  expect(drawn).toContain('>Skills</tspan>')
+  // the whole window, the room left in it named under the lens too
+  expect(drawn).toContain('42% of the 200.0k window in use, limit at 167.0k')
+  expect(drawn).toContain('>Free</tspan>')
+  expect(drawn).toContain('"label":"Details"')
+  expect(drawn).not.toContain('"key":"compact"')
+
+  await band.press({ key: 'details' })
+  await clock.settle()
+  expect(panes.map(p => p.id)).toEqual([PANE])
+  drawn = JSON.stringify(await band.drawn())
+  expect(drawn).toContain('"label":"Hide details"')
+
+  await band.press({ key: 'details' })
+  await clock.settle()
+  expect(panes).toEqual([])
+  expect(JSON.stringify(await band.drawn())).toContain('"label":"Details"')
+})
+
+test('on the terminal the strip steps aside for the docked pane, and draws its bar once it closes', async ($, on) => {
+  const { panes, clock } = engine(on)
+  // what the band shows with no plugin drawing in it
+  on('ui.render', { component: 'AbovePrompt' }, () => ({ type: 'Box', props: {}, children: [] }) as never)
+  await $.session.start(START)
+  expect(panes.map(p => p.id)).toEqual([PANE])
+
+  const band = await strip($, 'terminal')
+  await clock.settle()
+  expect(JSON.stringify(await band.drawn())).not.toContain('Healthy')
+
+  await $.command.run(run('off'))
+  const drawn = JSON.stringify(await band.drawn())
+  // the pane's own bar: setup and conversation in their colours, the
+  // auto-compact mark, the track before it and the pale window past it
+  expect(drawn).toContain('"color":"suggestion"},"children":["█')
+  expect(drawn).toContain('"color":"claude"},"children":["█')
+  expect(drawn).toContain('┃')
+  expect(drawn).toContain('░')
+  expect(drawn).not.toContain('"type":"Svg"')
+  expect(drawn).toContain('84.0k of 167.0k · 83.0k left')
+  // a quiet button, not the accent bracket
+  expect(drawn).toContain('"label":"details","plain":true,"dimColor":true')
+
+  await band.press({ key: 'details' })
+  await clock.settle()
+  expect(panes.map(p => p.id)).toEqual([PANE])
+  expect(JSON.stringify(await band.drawn())).not.toContain('Healthy')
+})
+
+test('the strip offers Compact once the context nears the limit', async ($, on) => {
+  const full: SessionUsage = { ...usage, context: { ...usage.context, tokens: 150_000, percent: 75 } }
+  const { clock } = engine(on, full)
+  await $.session.start({ ...START, surface: 'desktop' })
+  const band = await strip($, 'desktop')
+  await clock.settle()
+  const drawn = JSON.stringify(await band.drawn())
+  expect(drawn).toContain('Near auto-compact')
+  expect(drawn).toContain('"label":"Compact","variant":"primary"')
+})
+
+test('with the pane closed the strip still reads the breakdown as the context grows', async ($, on) => {
+  const current: SessionUsage = { ...usage }
+  const { panes, clock } = engine(on, current)
+  await $.session.start({ ...START, surface: 'desktop' })
+  const band = await strip($, 'desktop')
+  await clock.settle()
+  expect(panes).toEqual([])
+
+  // the conversation grew to 150.3k: read again, Skills stays 9.7k; left at
+  // the old breakdown, every part would be scaled up with the total
+  const breakdown = usage.context.breakdown!
+  current.context = {
+    ...usage.context,
+    tokens: 164_000,
+    breakdown: {
+      ...breakdown,
+      totalTokens: 164_000,
+      categories: breakdown.categories.map(c => (c.name === 'Messages' ? { ...c, tokens: 150_300 } : c)),
+    },
+  }
+  await $.session.measure({ context: { ...current.context, breakdown: undefined }, rateLimits: [], changed: ['context'] })
+  await clock.settle()
+  const drawn = JSON.stringify(await band.drawn())
+  expect(drawn).toContain('>Skills</tspan><tspan fill-opacity=\\".72\\">  9.7k')
+  expect(drawn).not.toContain('18.9k')
+})

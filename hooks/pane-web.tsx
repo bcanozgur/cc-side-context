@@ -1,6 +1,6 @@
 import type { Color } from 'claude-code'
 
-import type { Item, Picker, Row } from '../types'
+import type { Item, Picker, Row, Snapshot } from '../types'
 import { agoOf, eaterLabel, fitWidth, fmt, guardOf, isGuarded, limitName, tipOf } from './analysis'
 import {
   type PaneActions,
@@ -13,6 +13,7 @@ import {
   ruleOf,
   scaled,
   shownEaters,
+  statusOf,
   top,
 } from './pane'
 
@@ -60,6 +61,191 @@ const shareOf = (part: number, whole: number) => {
   return p < 1 ? '<1%' : `${Math.min(100, Math.round(p))}%`
 }
 
+// The meter is the whole window, as the host's own context bar: each part in
+// its colour, the latest turn a lighter stretch of the conversation, and the
+// limit the pane warns at a separator on it, the room past it a fainter track.
+// Drawn at any size: the pane's meter wide, the strip's above the prompt small.
+//
+// Under the pointer a lens magnifies it, so a sliver of a part grows readable,
+// with a tag beside it naming the part. The frame runs no script, so the lens
+// follows the pointer by CSS :hover on thin transparent columns over the bar.
+// It is one layer that only moves (transform and opacity, which the page
+// composites without repainting the rest): the bar under it is drawn once,
+// exactly as at rest, and the lens shows a magnified copy of that same bar.
+// No selector looks back at earlier siblings and nothing is filtered, so a
+// pointer move restyles two elements, not the whole drawing.
+
+// `zoom` is how many times wider the bar shows under the lens, `tall` how many
+// times taller, and `width` the lens's own width in pixels
+export type MeterLens = { zoom: number; tall: number; width: number }
+const LENS: MeterLens = { zoom: 4, tall: 1.5, width: 56 }
+
+// The same figures draw the same markup: a redraw that changed nothing the
+// meter shows (a cache countdown, a new trend point) reuses it, and the surface
+// is handed the very string it already has
+const drawn = new WeakMap<Snapshot, Map<string, string>>()
+
+export const meterSource = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number; lens?: MeterLens }): string => {
+  const lens = m.lens ?? LENS
+  const key = `${m.delta}|${m.budget}|${m.W}|${m.BH}|${m.H}|${lens.zoom}|${lens.tall}|${lens.width}`
+  const known = drawn.get(m.snap)?.get(key)
+  if (known !== undefined) return known
+  const source = drawMeter(m, lens)
+  const bySnap = drawn.get(m.snap) ?? new Map<string, string>()
+  // A snapshot is drawn at a size or two; more is a pane being resized
+  if (bySnap.size > 4) bySnap.clear()
+  bySnap.set(key, source)
+  drawn.set(m.snap, bySnap)
+  return source
+}
+
+const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number }, lens: MeterLens): string => {
+  const { snap, delta, budget, W, BH, H } = m
+  const inUse = snap.rows.filter(r => r.kind === 'used')
+  const conversation = inUse.find(r => /^messages/i.test(r.name))
+  const setup = inUse.filter(r => r !== conversation).sort((a, b) => b.tokens - a.tokens)
+  const total = inUse.reduce((sum, r) => sum + r.tokens, 0)
+  const top = (H - BH) / 2
+  const span = Math.max(snap.window, snap.tokens, 1)
+  const x = (tokens: number) => Math.max(0, Math.min(W, (tokens / span) * W))
+  // The rows are an estimate of the same whole: scaled to the measured total
+  const ratio = total > 0 ? snap.tokens / total : 0
+  const turn = Math.max(0, Math.min(delta, (conversation?.tokens ?? 0) * ratio))
+  const parts = [
+    ...setup.map(r => ({ name: labelOf(r.name), tokens: r.tokens * ratio, color: colorOf(r.name) })),
+    ...(conversation ? [{ name: 'Conversation', tokens: conversation.tokens * ratio - turn, color: colorOf(conversation.name) }] : []),
+    ...(conversation && turn > 0 ? [{ name: 'Latest turn', tokens: turn, color: lighter(colorOf(conversation.name)) }] : []),
+  ].filter(p => p.tokens > 0)
+  let at = 0
+  const spans = parts.map(p => {
+    const from = at
+    at += p.tokens
+    // A part of 1k or more is never thinner than a sliver
+    return { ...p, from: x(from), w: Math.max(p.tokens >= 1_000 ? 1.5 : 0, x(at) - x(from)) }
+  })
+  const rects = spans
+    .map(p => `<rect x="${p.from.toFixed(1)}" width="${p.w.toFixed(1)}" height="${BH}" fill="${p.color}"/>`)
+    .join('')
+  const isMarked = budget < span
+  const mark = x(budget)
+  // Whatever runs past the mark keeps its part colours under a faint red veil,
+  // so the list's colours still read and the overage still shows
+  const over = snap.tokens > budget && isMarked ? `<rect x="${mark.toFixed(1)}" width="${(x(snap.tokens) - mark).toFixed(1)}" height="${BH}" fill="${HEX.error}" fill-opacity="0.35"/>` : ''
+  const bar =
+    `<g id="bar" clip-path="url(#r)"><rect width="${W}" height="${BH}" fill="#80808033"/>` +
+    (isMarked ? `<rect x="${mark.toFixed(1)}" width="${(W - mark).toFixed(1)}" height="${BH}" fill="#80808014"/>` : '') +
+    `${rects}${over}` +
+    // The mark is a separator: a dark gap with a light line down its middle,
+    // so it reads against any part colour on either side
+    (isMarked ? `<rect x="${(mark - 2).toFixed(1)}" width="4" height="${BH}" fill="#000000" fill-opacity="0.6"/><rect x="${(mark - 0.75).toFixed(1)}" width="1.5" height="${BH}" fill="#e6e6e6"/>` : '') +
+    `</g>`
+
+  // The columns only catch the pointer: thin, so the lens steps in small
+  // moves its glide smooths over, few enough to keep the markup small
+  const col = Math.max(2, Math.ceil(W / 140))
+  const N = Math.ceil(W / col)
+
+  // Which part each column names: the one under its middle, except that a part
+  // thinner than a column, under no column's middle, takes the column it
+  // overlaps most from a part that has columns to spare, so every part on the
+  // meter can be read
+  const owner = Array.from({ length: N }, (_, i) => spans.findIndex(s => i * col + col / 2 >= s.from && i * col + col / 2 < s.from + s.w))
+  const held = (k: number) => owner.filter(o => o === k).length
+  spans.forEach((s, k) => {
+    if (held(k) > 0 || s.w <= 0) return
+    const overlap = (i: number) => Math.min(s.from + s.w, (i + 1) * col) - Math.max(s.from, i * col)
+    const first = Math.max(0, Math.floor(s.from / col))
+    const last = Math.min(N - 1, Math.floor((s.from + s.w - 0.001) / col))
+    const spare = Array.from({ length: last - first + 1 }, (_, n) => first + n)
+      .filter(i => owner[i] === -1 || held(owner[i] as number) > 1)
+      .sort((a, b) => overlap(b) - overlap(a))[0]
+    if (spare !== undefined) owner[spare] = k
+  })
+  // What a column names: its part, and whether it is past the mark
+  const partAt = (i: number) => {
+    const p = spans[owner[i] ?? -1]
+    const px = i * col + col / 2
+    return { name: p?.name ?? 'Free', size: p ? fmt(p.tokens) : fmt(Math.max(0, snap.window - snap.tokens)), color: p?.color ?? '#80808066', isPast: p !== undefined && isMarked && px >= mark }
+  }
+
+  const LW = Math.min(lens.width, W)
+  const LHt = Math.min(H - 2, BH * lens.tall + 4)
+  // The readout: a dark tag beside the lens naming the part and its size, at
+  // once rather than after a tooltip's delay. One tag per distinct reading,
+  // drawn on either side of the lens so it hides none of it
+  const LH = 18
+  const gap = LW / 2 + 4
+  const tagWidth = (t: string) => Math.ceil(t.length * 6) + 26
+  const tags: string[] = []
+  const tagOf = new Map<string, number>()
+  const readings = Array.from({ length: N }, (_, i) => {
+    const mid = i * col + col / 2
+    // Where the lens's middle sits: under the pointer, but never past an end
+    const lensAt = Math.max(LW / 2, Math.min(W - LW / 2, mid))
+    const p = partAt(i)
+    const text = `${p.name}  ${p.size}${p.isPast ? '  · over the limit' : ''}`
+    const w = tagWidth(text)
+    // The side with room, else the roomier one, kept inside the bar
+    const isRight = lensAt + gap + w <= W || (lensAt - gap - w < 0 && W - lensAt >= lensAt)
+    const x0 = Math.round(Math.max(-lensAt, Math.min(W - lensAt - w, isRight ? gap : -gap - w)))
+    const key = `${text}@${x0}`
+    if (!tagOf.has(key)) {
+      const n = tagOf.size
+      tagOf.set(key, n)
+      tags.push(
+        `<g class="t" id="t${n}" transform="translate(${x0} ${(H - LH) / 2})">` +
+          `<rect width="${w}" height="${LH}" rx="${LH / 2}" fill="#1c1c1e" fill-opacity=".9" stroke="#ffffff" stroke-opacity=".14"/>` +
+          `<circle cx="10" cy="${LH / 2}" r="3.5" fill="${p.color}"/>` +
+          `<text x="18" y="${LH / 2 + 3.5}" fill="#f5f5f7" font-size="10" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" xml:space="preserve">` +
+          `<tspan font-weight="600">${p.name}</tspan><tspan fill-opacity=".72">  ${p.size}</tspan>` +
+          (p.isPast ? `<tspan fill="#ff8a80">  · over the limit</tspan>` : '') +
+          `</text></g>`,
+      )
+    }
+    return { mid: +mid.toFixed(1), at: +lensAt.toFixed(1), tag: tagOf.get(key) as number }
+  })
+
+  // The lens sits at the column under the pointer (--l, kept inside the bar
+  // at the ends) and shows the bar magnified about the pointer (--m): the copy
+  // moves left by --m times the zoom, so the point under the pointer is drawn
+  // where the pointer is. Both moves run on one timing, so the copy and the
+  // glass never drift apart as they glide. At rest the lens fades where it is
+  // and only then goes back to the start
+  const Z = lens.zoom
+  const TY = (LHt - 4) / BH
+  const glide = '.11s cubic-bezier(.25,.8,.25,1)'
+  const css =
+    `.c{fill:#000;fill-opacity:0}` +
+    `#lens{--l:0px;--m:0px;pointer-events:none;opacity:0;transform:translateX(var(--l));transition:opacity .1s ease-out,transform 0s .1s}` +
+    `#lens .z{transform-box:view-box;transform-origin:0 ${H / 2}px;transform:translateX(calc(var(--m) - var(--l) - var(--m) * ${Z})) scale(${Z},${TY.toFixed(3)});transition:transform 0s .1s}` +
+    `.c:hover~#lens{opacity:1;transition:opacity .08s ease-out,transform ${glide}}` +
+    `.c:hover~#lens .z{transition:transform ${glide}}` +
+    `.t{opacity:0}` +
+    readings.map((r, i) => `#c${i}:hover~#lens{--l:${r.at}px;--m:${r.mid}px}#c${i}:hover~#lens #t${r.tag}{opacity:1}`).join('')
+  const columns = Array.from({ length: N }, (_, i) => `<rect class="c" id="c${i}" x="${i * col}" width="${col}" height="${H}"/>`).join('')
+  // Glass: a clear pane with the magnified bar in it, a bright rim with a dark
+  // hairline outside so it reads on a light pane and a dark one, and a sheen
+  // across its top. Drawn with strokes, not a shadow filter, which the page
+  // would have to recompute on every frame of the glide
+  const ly = (H - LHt) / 2
+  const glass =
+    `<g id="lens">` +
+    `<g clip-path="url(#lc)"><rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" fill="#1c1c1e"/>` +
+    `<g class="z"><use href="#bar" y="${top}"/></g>` +
+    `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" fill="url(#sheen)"/></g>` +
+    `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#000" stroke-opacity=".35" stroke-width="2.5"/>` +
+    `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#fff" stroke-opacity=".95" stroke-width="1.25"/>` +
+    `${tags.join('')}</g>`
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
+    `<style>${css}</style>` +
+    `<defs><clipPath id="r"><rect width="${W}" height="${BH}" rx="${BH / 2}" ry="${BH / 2}"/></clipPath>${bar}` +
+    `<clipPath id="lc"><rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7"/></clipPath>` +
+    `<linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".42"/><stop offset=".45" stop-color="#fff" stop-opacity=".06"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>` +
+    `<use href="#bar" y="${top}"/>${columns}${glass}</svg>`
+  )
+}
+
 export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
   const { Box, Text, Button } = ui
   const Svg = 'Svg' in ui ? ui.Svg : undefined
@@ -80,16 +266,8 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
   const budget = budgetOf(snap, d.quality)
   const isQualityFirst = budget < (snap.compactAt ?? snap.window)
   const limitLabel = isQualityFirst ? 'quality limit' : snap.compactAt !== undefined ? 'auto-compact' : 'window'
-  const pressure = budget > 0 ? snap.tokens / budget : 0
-  const status: { color: Color; text: string } = d.compacting
-    ? { color: 'claude', text: 'Compacting' }
-    : pressure >= 1
-      ? { color: 'error', text: 'Over the limit' }
-      : pressure >= 0.8
-        ? { color: 'error', text: isQualityFirst ? 'Time to compact' : 'Near auto-compact' }
-        : pressure >= 0.5
-          ? { color: 'warning', text: 'Filling up' }
-          : { color: 'success', text: 'Healthy' }
+  const status = statusOf(snap, d.quality, d.compacting)
+  const pressure = status.pressure
 
   const inUse = snap.rows.filter(r => r.kind === 'used')
   const conversation = inUse.find(r => /^messages/i.test(r.name))
@@ -165,188 +343,15 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
       </Box>
     ) : undefined
 
-  // The meter is the whole window, as the host's own context bar: each part in
-  // its colour, the latest turn a lighter stretch of the conversation, and the
-  // limit the pane warns at a separator on it, the room past it a fainter track.
-  // Under the pointer it swells as the macOS Dock does: the bar is cut into thin
-  // columns, the one under the pointer and its neighbours drawn wider and taller
-  // and the rest pushed aside, so a sliver of a part grows readable. The frame
-  // runs no script, so the swell is CSS :hover on the columns, not a position
+  // The meter, its lens under the pointer (meterSource)
   const meter = () => {
     if (!Svg) return undefined
     const W = Math.max(160, d.columns * 10)
-    // Room above and below the bar for the swell
+    // Room above and below the bar for the lens
     const BH = 20
     const H = 40
-    const top = (H - BH) / 2
-    const span = Math.max(snap.window, snap.tokens, 1)
-    const x = (tokens: number) => Math.max(0, Math.min(W, (tokens / span) * W))
-    // The rows are an estimate of the same whole: scaled to the measured total
-    const ratio = total > 0 ? snap.tokens / total : 0
-    const turn = Math.max(0, Math.min(d.live.delta, (conversation?.tokens ?? 0) * ratio))
-    const parts = [
-      ...setup.map(r => ({ name: labelOf(r.name), tokens: r.tokens * ratio, color: colorOf(r.name) })),
-      ...(conversation ? [{ name: 'Conversation', tokens: conversation.tokens * ratio - turn, color: colorOf(conversation.name) }] : []),
-      ...(conversation && turn > 0 ? [{ name: 'Latest turn', tokens: turn, color: lighter(colorOf(conversation.name)) }] : []),
-    ].filter(p => p.tokens > 0)
-    let at = 0
-    const spans = parts.map(p => {
-      const from = at
-      at += p.tokens
-      // A part of 1k or more is never thinner than a sliver
-      return { ...p, from: x(from), w: Math.max(p.tokens >= 1_000 ? 1.5 : 0, x(at) - x(from)) }
-    })
-    const rects = spans
-      .map(p => `<rect x="${p.from.toFixed(1)}" width="${p.w.toFixed(1)}" height="${BH}" fill="${p.color}"/>`)
-      .join('')
-    const isMarked = budget < span
-    const mark = x(budget)
-    // Whatever runs past the mark keeps its part colours under a faint red veil,
-    // so the list's colours still read and the overage still shows
-    const over = snap.tokens > budget && isMarked ? `<rect x="${mark.toFixed(1)}" width="${(x(snap.tokens) - mark).toFixed(1)}" height="${BH}" fill="${HEX.error}" fill-opacity="0.35"/>` : ''
-    const bar =
-      `<g id="bar" clip-path="url(#r)"><rect width="${W}" height="${BH}" fill="#80808033"/>` +
-      (isMarked ? `<rect x="${mark.toFixed(1)}" width="${(W - mark).toFixed(1)}" height="${BH}" fill="#80808014"/>` : '') +
-      `${rects}${over}` +
-      // The mark is a separator: a dark gap with a light line down its middle,
-      // so it reads against any part colour on either side
-      (isMarked ? `<rect x="${(mark - 2).toFixed(1)}" width="4" height="${BH}" fill="#000000" fill-opacity="0.6"/><rect x="${(mark - 0.75).toFixed(1)}" width="1.5" height="${BH}" fill="#e6e6e6"/>` : '') +
-      `</g>`
-
-    // Whole-pixel columns that tile edge to edge: overlapping slices would
-    // paint the translucent track twice and show as seams
-    // Thin enough that the swell's steps read as a curve, few enough that the
-    // markup stays well under the Svg's size limit on a wide pane
-    const col = Math.max(4, Math.ceil(W / 160))
-    const N = Math.ceil(W / col)
-    // The swell: the column under the pointer and seven on each side, each wider
-    // (kx) and taller (ky) the nearer it is, on a bell curve as the Dock's icons
-    // are; the columns beyond move out by the width the swell gained and dim, so
-    // the stretch under the lens is the one in focus
-    const bell = (peak: number, spread: number) => Array.from({ length: 8 }, (_, j) => +(1 + peak * Math.exp(-((j / spread) ** 2))).toFixed(3))
-    const kx = bell(3, 3)
-    const ky = bell(0.6, 3.6)
-    const K = kx.length - 1
-    // How far the column `j` steps from the pointer's moves: half the pointer's
-    // column's gain, all of the gains between, and half its own
-    const reach = (j: number) => {
-      const gain = (k: number) => (kx[k] ?? 1) - 1
-      let s = gain(0) / 2
-      for (let m = 1; m < j; m++) s += gain(m)
-      return (s + gain(j) / 2) * col
-    }
-    const shift = (j: number) => reach(j).toFixed(1)
-    const swell = (sel: string, j: number, dx: string) =>
-      `${sel} .s{transform:translateX(${dx}px) scale(${kx[j] ?? 1},${ky[j] ?? 1})${j > K ? ';opacity:.5' : ''}}`
-
-    // Which part each column names: the one under its middle, except that a part
-    // thinner than a column, under no column's middle, takes the column it
-    // overlaps most from a part that has columns to spare, so every part on the
-    // meter can be read
-    const owner = Array.from({ length: N }, (_, i) => spans.findIndex(s => i * col + col / 2 >= s.from && i * col + col / 2 < s.from + s.w))
-    const held = (k: number) => owner.filter(o => o === k).length
-    spans.forEach((s, k) => {
-      if (held(k) > 0 || s.w <= 0) return
-      const overlap = (i: number) => Math.min(s.from + s.w, (i + 1) * col) - Math.max(s.from, i * col)
-      const first = Math.max(0, Math.floor(s.from / col))
-      const last = Math.min(N - 1, Math.floor((s.from + s.w - 0.001) / col))
-      const spare = Array.from({ length: last - first + 1 }, (_, n) => first + n)
-        .filter(i => owner[i] === -1 || held(owner[i] as number) > 1)
-        .sort((a, b) => overlap(b) - overlap(a))[0]
-      if (spare !== undefined) owner[spare] = k
-    })
-    // What a column names: its part, and whether it is past the mark
-    const partAt = (i: number) => {
-      const p = spans[owner[i] ?? -1]
-      const px = i * col + col / 2
-      return { name: p?.name ?? 'Free', size: p ? fmt(p.tokens) : fmt(Math.max(0, snap.window - snap.tokens)), color: p?.color ?? '#80808066', isPast: p !== undefined && isMarked && px >= mark }
-    }
-    // The readout: a dark tag beside the lens naming the part and its size, at
-    // once rather than after a tooltip's delay. One tag per distinct reading,
-    // drawn on either side of the lens, beyond the swell so it hides none of it
-    const LH = 18
-    const gap = reach(K + 1) + 4
-    const tagWidth = (t: string) => Math.ceil(t.length * 6) + 26
-    const tags: string[] = []
-    const tagOf = new Map<string, number>()
-    const readings = Array.from({ length: N }, (_, i) => {
-      const mid = i * col + col / 2
-      const p = partAt(i)
-      const text = `${p.name}  ${p.size}${p.isPast ? '  · over the limit' : ''}`
-      const w = tagWidth(text)
-      // The side with room, else the roomier one, kept inside the bar
-      const isRight = mid + gap + w <= W || (mid - gap - w < 0 && W - mid >= mid)
-      const x0 = Math.round(Math.max(-mid, Math.min(W - mid - w, isRight ? gap : -gap - w)))
-      const key = `${text}@${x0}`
-      if (!tagOf.has(key)) {
-        const n = tagOf.size
-        tagOf.set(key, n)
-        tags.push(
-          `<g class="t" id="t${n}" transform="translate(${x0} ${(H - LH) / 2})">` +
-            `<rect width="${w}" height="${LH}" rx="${LH / 2}" fill="#1c1c1e" fill-opacity=".9" stroke="#ffffff" stroke-opacity=".14"/>` +
-            `<circle cx="10" cy="${LH / 2}" r="3.5" fill="${p.color}"/>` +
-            `<text x="18" y="${LH / 2 + 3.5}" fill="#f5f5f7" font-size="10" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" xml:space="preserve">` +
-            `<tspan font-weight="600">${p.name}</tspan><tspan fill-opacity=".72">  ${p.size}</tspan>` +
-            (p.isPast ? `<tspan fill="#ff8a80">  · over the limit</tspan>` : '') +
-            `</text></g>`,
-        )
-      }
-      return { mid, tag: tagOf.get(key) as number }
-    })
-
-    // The lens and its tag are one layer over the columns that glides to the
-    // column under the pointer, so it follows the pointer rather than jumping;
-    // neither takes the pointer, or the columns under them would lose it. It
-    // rests at the left end, so on the way in it slides there unseen and only
-    // then shows; on the way out it fades where it is before going back
-    const LW = col * kx[0] + 6
-    const LHt = BH * ky[0] + 4
-    // Short and settling without a bounce, so the swell keeps up with a moving
-    // pointer instead of trailing it; only the glass springs as it opens
-    const ease = 'cubic-bezier(.3,1.35,.5,1)'
-    const quick = 'cubic-bezier(.2,.8,.2,1)'
-    const css =
-      `.s{transition:transform .12s ${quick},opacity .12s ease-out}` +
-      `#lens{pointer-events:none;opacity:0;transition:transform 0s .16s,opacity .12s ease-out}` +
-      `.glass{transform:scale(.55);transform-box:fill-box;transform-origin:center;transition:transform .16s ease-in}` +
-      `.c:hover~#lens{opacity:1;transition:transform .09s ${quick},opacity .08s ease-out .05s}` +
-      `.c:hover~#lens .glass{transform:scale(1);transition:transform .18s ${ease} .05s}` +
-      `.t{opacity:0;transition:opacity .06s ease-out}` +
-      swell('.c:hover', 0, '0') +
-      Array.from({ length: K }, (_, m) => {
-        const j = m + 1
-        return swell(`.c:hover${'+.c'.repeat(j)}`, j, shift(j)) + swell(`.c:has(${'+.c'.repeat(j)}:hover)`, j, `-${shift(j)}`)
-      }).join('') +
-      swell(`.c:hover${'+.c'.repeat(K)}~.c`, K + 1, shift(K + 1)) +
-      swell(`.c:has(~.c${'+.c'.repeat(K)}:hover)`, K + 1, `-${shift(K + 1)}`) +
-      readings.map((r, i) => `#c${i}:hover~#lens{transform:translateX(${r.mid}px)}#c${i}:hover~#lens #t${r.tag}{opacity:1}`).join('')
-    // The slices' clips sit in the defs, so the columns are siblings with
-    // nothing between them and `.c:hover+.c` reaches the neighbours
-    const clips = Array.from({ length: N }, (_, i) => `<clipPath id="k${i}"><rect x="${i * col}" width="${col}" height="${BH}" shape-rendering="crispEdges"/></clipPath>`).join('')
-    const columns = Array.from({ length: N }, (_, i) => {
-      const left = i * col
-      const mid = left + col / 2
-      return (
-        `<g class="c" id="c${i}">` +
-        `<rect x="${left}" width="${col}" height="${H}" fill="#000" fill-opacity="0"/>` +
-        `<g class="s" style="transform-origin:${mid}px ${H / 2}px">` +
-        `<g transform="translate(0 ${top})"><use href="#bar" clip-path="url(#k${i})"/></g></g></g>`
-      )
-    }).join('')
-    // Glass: a soft shadow under it, a bright rim with a dark hairline outside
-    // so it reads on a light pane and a dark one, and a sheen across its top
-    const lens =
-      `<g id="lens"><g class="glass">` +
-      `<rect x="${-LW / 2}" y="${(H - LHt) / 2}" width="${LW}" height="${LHt}" rx="7" fill="url(#sheen)" stroke="#000" stroke-opacity=".28" stroke-width="2.5" filter="url(#lift)"/>` +
-      `<rect x="${-LW / 2}" y="${(H - LHt) / 2}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#fff" stroke-opacity=".95" stroke-width="1.25"/>` +
-      `</g>${tags.join('')}</g>`
-    const source =
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
-      `<style>${css}</style>` +
-      `<defs><clipPath id="r"><rect width="${W}" height="${BH}" rx="${BH / 2}" ry="${BH / 2}"/></clipPath>${bar}${clips}` +
-      `<linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".42"/><stop offset=".45" stop-color="#fff" stop-opacity=".06"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>` +
-      `<filter id="lift" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#000" flood-opacity=".35"/></filter></defs>` +
-      `${columns}${lens}</svg>`
+    const isMarked = budget < Math.max(snap.window, snap.tokens, 1)
+    const source = meterSource({ snap, delta: d.live.delta, budget, W, BH, H })
     return (
       <Box width="100%">
         <Svg
