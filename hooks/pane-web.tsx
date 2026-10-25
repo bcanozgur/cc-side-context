@@ -177,7 +177,7 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     const W = Math.max(160, d.columns * 10)
     // Room above and below the bar for the swell
     const BH = 20
-    const H = 34
+    const H = 40
     const top = (H - BH) / 2
     const span = Math.max(snap.window, snap.tokens, 1)
     const x = (tokens: number) => Math.max(0, Math.min(W, (tokens / span) * W))
@@ -215,56 +215,118 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
 
     // Whole-pixel columns that tile edge to edge: overlapping slices would
     // paint the translucent track twice and show as seams
-    const col = 6
+    // Thin enough that the swell's steps read as a curve, few enough that the
+    // markup stays well under the Svg's size limit on a wide pane
+    const col = Math.max(4, Math.ceil(W / 160))
     const N = Math.ceil(W / col)
-    // The swell: the column under the pointer and four on each side, each wider
-    // (kx) and taller (ky) the nearer it is, falling off as the Dock's icons do;
-    // the columns beyond move out by the width the swell gained
-    const kx = [3, 2.6, 2, 1.5, 1.2]
-    const ky = [1.6, 1.45, 1.3, 1.15, 1.05]
+    // The swell: the column under the pointer and seven on each side, each wider
+    // (kx) and taller (ky) the nearer it is, on a bell curve as the Dock's icons
+    // are; the columns beyond move out by the width the swell gained and dim, so
+    // the stretch under the lens is the one in focus
+    const bell = (peak: number, spread: number) => Array.from({ length: 8 }, (_, j) => +(1 + peak * Math.exp(-((j / spread) ** 2))).toFixed(3))
+    const kx = bell(2, 3)
+    const ky = bell(0.6, 3.6)
     const K = kx.length - 1
     // How far the column `j` steps from the pointer's moves: half the pointer's
     // column's gain, all of the gains between, and half its own
-    const shift = (j: number) => {
+    const reach = (j: number) => {
       const gain = (k: number) => (kx[k] ?? 1) - 1
       let s = gain(0) / 2
       for (let m = 1; m < j; m++) s += gain(m)
-      return ((s + gain(j) / 2) * col).toFixed(1)
+      return (s + gain(j) / 2) * col
     }
+    const shift = (j: number) => reach(j).toFixed(1)
     const swell = (sel: string, j: number, dx: string) =>
-      `${sel} .s{transform:translateX(${dx}px) scale(${kx[j] ?? 1},${ky[j] ?? 1})}`
-    // Columns after the pointer's by sibling order, those before it by :has
+      `${sel} .s{transform:translateX(${dx}px) scale(${kx[j] ?? 1},${ky[j] ?? 1})${j > K ? ';opacity:.5' : ''}}`
+
+    // What sits under a column's middle: its part, and whether it is past the mark
+    const partAt = (px: number) => {
+      const p = spans.find(s => px >= s.from && px < s.from + s.w)
+      return { name: p?.name ?? 'Free', size: p ? fmt(p.tokens) : fmt(Math.max(0, snap.window - snap.tokens)), color: p?.color ?? '#80808066', isPast: p !== undefined && isMarked && px >= mark }
+    }
+    // The readout: a dark tag beside the lens naming the part and its size, at
+    // once rather than after a tooltip's delay. One tag per distinct reading,
+    // drawn on either side of the lens, beyond the swell so it hides none of it
+    const LH = 18
+    const gap = reach(K + 1) + 4
+    const tagWidth = (t: string) => Math.ceil(t.length * 6) + 26
+    const tags: string[] = []
+    const tagOf = new Map<string, number>()
+    const readings = Array.from({ length: N }, (_, i) => {
+      const mid = i * col + col / 2
+      const p = partAt(mid)
+      const text = `${p.name}  ${p.size}${p.isPast ? '  · over the limit' : ''}`
+      const w = tagWidth(text)
+      // The side with room, else the roomier one, kept inside the bar
+      const isRight = mid + gap + w <= W || (mid - gap - w < 0 && W - mid >= mid)
+      const x0 = Math.round(Math.max(-mid, Math.min(W - mid - w, isRight ? gap : -gap - w)))
+      const key = `${text}@${x0}`
+      if (!tagOf.has(key)) {
+        const n = tagOf.size
+        tagOf.set(key, n)
+        tags.push(
+          `<g class="t" id="t${n}" transform="translate(${x0} ${(H - LH) / 2})">` +
+            `<rect width="${w}" height="${LH}" rx="${LH / 2}" fill="#1c1c1e" fill-opacity=".9" stroke="#ffffff" stroke-opacity=".14"/>` +
+            `<circle cx="10" cy="${LH / 2}" r="3.5" fill="${p.color}"/>` +
+            `<text x="18" y="${LH / 2 + 3.5}" fill="#f5f5f7" font-size="10" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" xml:space="preserve">` +
+            `<tspan font-weight="600">${p.name}</tspan><tspan fill-opacity=".72">  ${p.size}</tspan>` +
+            (p.isPast ? `<tspan fill="#ff8a80">  · over the limit</tspan>` : '') +
+            `</text></g>`,
+        )
+      }
+      return { mid, tag: tagOf.get(key) as number }
+    })
+
+    // The lens and its tag are one layer over the columns that glides to the
+    // column under the pointer, so it follows the pointer rather than jumping;
+    // neither takes the pointer, or the columns under them would lose it. It
+    // rests at the left end, so on the way in it slides there unseen and only
+    // then shows; on the way out it fades where it is before going back
+    const LW = col * kx[0] + 6
+    const LHt = BH * ky[0] + 4
+    const ease = 'cubic-bezier(.3,1.35,.5,1)'
     const css =
-      `.s{transition:transform .14s ease-out}` +
+      `.s{transition:transform .26s ${ease},opacity .2s ease-out}` +
+      `#lens{pointer-events:none;opacity:0;transition:transform 0s .2s,opacity .16s ease-out}` +
+      `.glass{transform:scale(.55);transform-box:fill-box;transform-origin:center;transition:transform .2s ease-in}` +
+      `.c:hover~#lens{opacity:1;transition:transform .18s cubic-bezier(.2,.8,.2,1),opacity .14s ease-out .1s}` +
+      `.c:hover~#lens .glass{transform:scale(1);transition:transform .3s ${ease} .1s}` +
+      `.t{opacity:0;transition:opacity .12s ease-out}` +
       swell('.c:hover', 0, '0') +
       Array.from({ length: K }, (_, m) => {
         const j = m + 1
         return swell(`.c:hover${'+.c'.repeat(j)}`, j, shift(j)) + swell(`.c:has(${'+.c'.repeat(j)}:hover)`, j, `-${shift(j)}`)
       }).join('') +
       swell(`.c:hover${'+.c'.repeat(K)}~.c`, K + 1, shift(K + 1)) +
-      swell(`.c:has(~.c${'+.c'.repeat(K)}:hover)`, K + 1, `-${shift(K + 1)}`)
-    // What sits under a column's middle, for its tooltip
-    const partAt = (px: number) => {
-      const p = spans.find(s => px >= s.from && px < s.from + s.w)
-      const name = p ? `${p.name} ${fmt(p.tokens)}` : 'Free'
-      return isMarked && px >= mark ? `${name} · past the ${limitLabel}` : name
-    }
+      swell(`.c:has(~.c${'+.c'.repeat(K)}:hover)`, K + 1, `-${shift(K + 1)}`) +
+      readings.map((r, i) => `#c${i}:hover~#lens{transform:translateX(${r.mid}px)}#c${i}:hover~#lens #t${r.tag}{opacity:1}`).join('')
+    // The slices' clips sit in the defs, so the columns are siblings with
+    // nothing between them and `.c:hover+.c` reaches the neighbours
+    const clips = Array.from({ length: N }, (_, i) => `<clipPath id="k${i}"><rect x="${i * col}" width="${col}" height="${BH}" shape-rendering="crispEdges"/></clipPath>`).join('')
     const columns = Array.from({ length: N }, (_, i) => {
       const left = i * col
       const mid = left + col / 2
       return (
-        `<clipPath id="k${i}"><rect x="${left}" width="${col}" height="${BH}" shape-rendering="crispEdges"/></clipPath>` +
-        `<g class="c"><title>${partAt(mid)}</title>` +
+        `<g class="c" id="c${i}">` +
         `<rect x="${left}" width="${col}" height="${H}" fill="#000" fill-opacity="0"/>` +
         `<g class="s" style="transform-origin:${mid}px ${H / 2}px">` +
         `<g transform="translate(0 ${top})"><use href="#bar" clip-path="url(#k${i})"/></g></g></g>`
       )
     }).join('')
+    // Glass: a soft shadow under it, a bright rim with a dark hairline outside
+    // so it reads on a light pane and a dark one, and a sheen across its top
+    const lens =
+      `<g id="lens"><g class="glass">` +
+      `<rect x="${-LW / 2}" y="${(H - LHt) / 2}" width="${LW}" height="${LHt}" rx="7" fill="url(#sheen)" stroke="#000" stroke-opacity=".28" stroke-width="2.5" filter="url(#lift)"/>` +
+      `<rect x="${-LW / 2}" y="${(H - LHt) / 2}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#fff" stroke-opacity=".95" stroke-width="1.25"/>` +
+      `</g>${tags.join('')}</g>`
     const source =
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
       `<style>${css}</style>` +
-      `<defs><clipPath id="r"><rect width="${W}" height="${BH}" rx="${BH / 2}" ry="${BH / 2}"/></clipPath>${bar}</defs>` +
-      `${columns}</svg>`
+      `<defs><clipPath id="r"><rect width="${W}" height="${BH}" rx="${BH / 2}" ry="${BH / 2}"/></clipPath>${bar}${clips}` +
+      `<linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".42"/><stop offset=".45" stop-color="#fff" stop-opacity=".06"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>` +
+      `<filter id="lift" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="1.5" stdDeviation="2" flood-color="#000" flood-opacity=".35"/></filter></defs>` +
+      `${columns}${lens}</svg>`
     return (
       <Box width="100%">
         <Svg

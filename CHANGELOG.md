@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.3 · 2026-10-25
+
+**Desktop app: a lens over the meter**
+
+- The swell under the pointer now reaches the neighbours, as it was meant to: each column's clip sat between the columns, so only the one under the pointer ever grew. It rises on a bell curve over thinner columns, so it reads as one smooth bulge rather than steps, and settles back with a soft spring.
+- A glass lens rides on the stretch under the pointer and glides with it; the bar beyond the swell dims, so the part in focus stands out.
+- The reading shows at once in a dark tag beside the lens (`● Skills  2.5k`), on whichever side has room and never over the swell, instead of a system tooltip after a delay. A part past the limit says `· over the limit`; free room past it no longer does.
+- The latest turn's stretch is an opaque, lighter tint of the conversation green, matching its dot; *Count exactly* sits quietly at the foot while sizes are estimates instead of taking the next-step slot.
+
 ## 0.8.2 · 2026-10-22
 
 - Desktop app: the context bar is twice as thick (20px), its ends fully round; the swell under the pointer grows it less tall (1.6×, was 2.4×) so the meter takes little more room, and as much wider as before.
