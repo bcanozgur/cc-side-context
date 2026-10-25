@@ -46,6 +46,11 @@ const PART: Record<string, string> = {
 const OTHER = '#8c939c'
 const colorOf = (name: string): string => PART[labelOf(name)] ?? OTHER
 
+// A part's colour lifted toward white, still opaque: a translucent fill would
+// mix with the track into a murky shade the list's dot does not have
+const lighter = (hex: string, by = 0.3): string =>
+  '#' + [1, 3, 5].map(i => Math.round(parseInt(hex.slice(i, i + 2), 16) * (1 - by) + 255 * by).toString(16).padStart(2, '0')).join('')
+
 const HEX = { error: '#d0453a', mark: '#9a9a9a' } as const
 
 // A share of a whole, as the host's own context list writes it
@@ -91,8 +96,7 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
   const setup = inUse.filter(r => r !== conversation).sort((a, b) => b.tokens - a.tokens)
   const setupTokens = setup.reduce((sum, r) => sum + r.tokens, 0)
   const total = inUse.reduce((sum, r) => sum + r.tokens, 0)
-  // Only the exact count may say a row is too large; an estimate only asks
-  const flagged = inUse.filter(r => isHeavy(r, snap, d.quality))
+  // Only the exact count may say a row is too large
   const isLarge = (r: Row) => isExact && isHeavy(r, snap, d.quality)
 
   const canResume = d.live.fresh === true
@@ -181,9 +185,9 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     const ratio = total > 0 ? snap.tokens / total : 0
     const turn = Math.max(0, Math.min(d.live.delta, (conversation?.tokens ?? 0) * ratio))
     const parts = [
-      ...setup.map(r => ({ name: labelOf(r.name), tokens: r.tokens * ratio, color: colorOf(r.name), opacity: 1 })),
-      ...(conversation ? [{ name: 'Conversation', tokens: conversation.tokens * ratio - turn, color: colorOf(conversation.name), opacity: 1 }] : []),
-      ...(conversation && turn > 0 ? [{ name: 'Latest turn', tokens: turn, color: colorOf(conversation.name), opacity: 0.5 }] : []),
+      ...setup.map(r => ({ name: labelOf(r.name), tokens: r.tokens * ratio, color: colorOf(r.name) })),
+      ...(conversation ? [{ name: 'Conversation', tokens: conversation.tokens * ratio - turn, color: colorOf(conversation.name) }] : []),
+      ...(conversation && turn > 0 ? [{ name: 'Latest turn', tokens: turn, color: lighter(colorOf(conversation.name)) }] : []),
     ].filter(p => p.tokens > 0)
     let at = 0
     const spans = parts.map(p => {
@@ -193,7 +197,7 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
       return { ...p, from: x(from), w: Math.max(p.tokens >= 1_000 ? 1.5 : 0, x(at) - x(from)) }
     })
     const rects = spans
-      .map(p => `<rect x="${p.from.toFixed(1)}" width="${p.w.toFixed(1)}" height="${BH}" fill="${p.color}" fill-opacity="${p.opacity}"/>`)
+      .map(p => `<rect x="${p.from.toFixed(1)}" width="${p.w.toFixed(1)}" height="${BH}" fill="${p.color}"/>`)
       .join('')
     const isMarked = budget < span
     const mark = x(budget)
@@ -275,15 +279,13 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
   }
 
   // What to do now: a few words and one primary button, or nothing
-  const next: { text: string; color?: Color; press?: 'compact' | 'exact' | 'guard' | 'handoff' | 'resume' } | undefined = d.compacting
+  const next: { text: string; color?: Color; press?: 'compact' | 'guard' | 'handoff' | 'resume' } | undefined = d.compacting
     ? { text: 'Keeping your goal, rules and decisions…', color: 'claude' }
     : canResume && picker.state === 'closed'
       ? { text: 'Pick up a past session?', press: 'resume' }
       : pressure >= 0.8
         ? { text: 'Compact keeps your goal and decisions', color: 'error', press: 'compact' }
-        : flagged.length > 0 && !isExact
-          ? { text: 'Sizes are estimates', press: 'exact' }
-          : pressure >= 0.5 && canGuard
+        : pressure >= 0.5 && canGuard
             ? { text: 'One output takes a lot of room', color: 'warning', press: 'guard' }
             : pressure >= 0.5
               ? { text: 'Hand off before it gets tight', color: 'warning', press: 'handoff' }
@@ -477,8 +479,11 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
           </Box>,
         )
 
-  // The actions the next step did not take, quiet, at the foot
-  const rest = (['compact', 'handoff', ...(canGuard ? ['guard'] : []), ...(canResume ? ['resume'] : [])] as (keyof typeof ACTION)[]).filter(k => k !== next?.press)
+  // The actions the next step did not take, quiet, at the foot; the exact count
+  // only while the sizes are estimates
+  const rest = (['compact', 'handoff', ...(canGuard ? ['guard'] : []), ...(isExact ? [] : ['exact']), ...(canResume ? ['resume'] : [])] as (keyof typeof ACTION)[]).filter(
+    k => k !== next?.press,
+  )
 
   return (
     <Box flexDirection="column" width="100%">

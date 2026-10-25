@@ -194,11 +194,12 @@ test('draws the breakdown on every surface', async ($, on) => {
       // one fact per row, with its share of what is in context
       expect(drawn).toContain('System prompt')
       expect(drawn).toContain('["84%"]')
-      // an estimate neither flags a row nor gives a fix: the next step offers the count
+      // an estimate neither flags a row nor gives a fix, nor takes the next
+      // step: the count is a quiet button at the foot
       expect(drawn).not.toContain('Disable unused plugins in /plugin')
-      expect(drawn).toContain('Sizes are estimates')
+      expect(drawn).not.toContain('Sizes are estimates')
       expect(drawn.match(/"variant":"primary"/g)?.length).toBe(1)
-      expect(drawn).toContain('Count exactly')
+      expect(drawn).toContain('"label":"Count exactly","hotkey":"r","variant":"secondary"')
     }
     await pane.unmount()
   }
@@ -218,7 +219,7 @@ test('on the page the exact count flags a row, its fix under the pointer', async
   const drawn = JSON.stringify(await pane.drawn())
   expect(drawn).toContain('Disable unused plugins in /plugin')
   expect(drawn).toContain('"display":"none"')
-  expect(drawn).not.toContain('Sizes are estimates')
+  expect(drawn).not.toContain('Count exactly')
 })
 
 const mount = ($: Parameters<TestBody>[0]) =>
@@ -483,7 +484,7 @@ test('on the page a 1M window fills the whole bar, the quality limit marked on i
   expect(drawn).toContain('186.0k left')
   expect(drawn).toContain('6% of the 1.0M window in use, quality limit marked at 250.0k')
   // the mark sits a quarter of the way along
-  expect(drawn).toContain('x=\\"248.0\\" width=\\"4\\"')
+  expect(drawn).toContain('x=\\"98.0\\" width=\\"4\\"')
 })
 
 test('with auto-compact off the bar counts towards the window', async ($, on) => {
