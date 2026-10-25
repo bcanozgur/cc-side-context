@@ -224,7 +224,7 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     // are; the columns beyond move out by the width the swell gained and dim, so
     // the stretch under the lens is the one in focus
     const bell = (peak: number, spread: number) => Array.from({ length: 8 }, (_, j) => +(1 + peak * Math.exp(-((j / spread) ** 2))).toFixed(3))
-    const kx = bell(2, 3)
+    const kx = bell(3, 3)
     const ky = bell(0.6, 3.6)
     const K = kx.length - 1
     // How far the column `j` steps from the pointer's moves: half the pointer's
@@ -239,9 +239,26 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     const swell = (sel: string, j: number, dx: string) =>
       `${sel} .s{transform:translateX(${dx}px) scale(${kx[j] ?? 1},${ky[j] ?? 1})${j > K ? ';opacity:.5' : ''}}`
 
-    // What sits under a column's middle: its part, and whether it is past the mark
-    const partAt = (px: number) => {
-      const p = spans.find(s => px >= s.from && px < s.from + s.w)
+    // Which part each column names: the one under its middle, except that a part
+    // thinner than a column, under no column's middle, takes the column it
+    // overlaps most from a part that has columns to spare, so every part on the
+    // meter can be read
+    const owner = Array.from({ length: N }, (_, i) => spans.findIndex(s => i * col + col / 2 >= s.from && i * col + col / 2 < s.from + s.w))
+    const held = (k: number) => owner.filter(o => o === k).length
+    spans.forEach((s, k) => {
+      if (held(k) > 0 || s.w <= 0) return
+      const overlap = (i: number) => Math.min(s.from + s.w, (i + 1) * col) - Math.max(s.from, i * col)
+      const first = Math.max(0, Math.floor(s.from / col))
+      const last = Math.min(N - 1, Math.floor((s.from + s.w - 0.001) / col))
+      const spare = Array.from({ length: last - first + 1 }, (_, n) => first + n)
+        .filter(i => owner[i] === -1 || held(owner[i] as number) > 1)
+        .sort((a, b) => overlap(b) - overlap(a))[0]
+      if (spare !== undefined) owner[spare] = k
+    })
+    // What a column names: its part, and whether it is past the mark
+    const partAt = (i: number) => {
+      const p = spans[owner[i] ?? -1]
+      const px = i * col + col / 2
       return { name: p?.name ?? 'Free', size: p ? fmt(p.tokens) : fmt(Math.max(0, snap.window - snap.tokens)), color: p?.color ?? '#80808066', isPast: p !== undefined && isMarked && px >= mark }
     }
     // The readout: a dark tag beside the lens naming the part and its size, at
@@ -254,7 +271,7 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     const tagOf = new Map<string, number>()
     const readings = Array.from({ length: N }, (_, i) => {
       const mid = i * col + col / 2
-      const p = partAt(mid)
+      const p = partAt(i)
       const text = `${p.name}  ${p.size}${p.isPast ? '  · over the limit' : ''}`
       const w = tagWidth(text)
       // The side with room, else the roomier one, kept inside the bar
@@ -284,14 +301,17 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     // then shows; on the way out it fades where it is before going back
     const LW = col * kx[0] + 6
     const LHt = BH * ky[0] + 4
+    // Short and settling without a bounce, so the swell keeps up with a moving
+    // pointer instead of trailing it; only the glass springs as it opens
     const ease = 'cubic-bezier(.3,1.35,.5,1)'
+    const quick = 'cubic-bezier(.2,.8,.2,1)'
     const css =
-      `.s{transition:transform .26s ${ease},opacity .2s ease-out}` +
-      `#lens{pointer-events:none;opacity:0;transition:transform 0s .2s,opacity .16s ease-out}` +
-      `.glass{transform:scale(.55);transform-box:fill-box;transform-origin:center;transition:transform .2s ease-in}` +
-      `.c:hover~#lens{opacity:1;transition:transform .18s cubic-bezier(.2,.8,.2,1),opacity .14s ease-out .1s}` +
-      `.c:hover~#lens .glass{transform:scale(1);transition:transform .3s ${ease} .1s}` +
-      `.t{opacity:0;transition:opacity .12s ease-out}` +
+      `.s{transition:transform .12s ${quick},opacity .12s ease-out}` +
+      `#lens{pointer-events:none;opacity:0;transition:transform 0s .16s,opacity .12s ease-out}` +
+      `.glass{transform:scale(.55);transform-box:fill-box;transform-origin:center;transition:transform .16s ease-in}` +
+      `.c:hover~#lens{opacity:1;transition:transform .09s ${quick},opacity .08s ease-out .05s}` +
+      `.c:hover~#lens .glass{transform:scale(1);transition:transform .18s ${ease} .05s}` +
+      `.t{opacity:0;transition:opacity .06s ease-out}` +
       swell('.c:hover', 0, '0') +
       Array.from({ length: K }, (_, m) => {
         const j = m + 1

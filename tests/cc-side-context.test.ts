@@ -487,6 +487,29 @@ test('on the page a 1M window fills the whole bar, the quality limit marked on i
   expect(drawn).toContain('x=\\"98.0\\" width=\\"4\\"')
 })
 
+test('on the page a part thinner than a column is still named under the pointer', async ($, on) => {
+  // On a 400-wide bar of 1M, Skills is 1.5 wide and under no column's middle
+  const b = big.context.breakdown
+  const categories = [
+    { name: 'System tools', tokens: 20_000, color: 'inactive', isDeferred: false, kind: 'used' as const },
+    { name: 'Skills', tokens: 3_750, color: 'warning', isDeferred: false, kind: 'used' as const },
+    { name: 'Messages', tokens: 40_250, color: 'claude', isDeferred: false, kind: 'used' as const },
+  ]
+  engine(on, { ...big, context: { ...big.context, tokens: 64_000, percent: 6, breakdown: b && { ...b, categories } } })
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  const pane = await $.ui.mount({
+    plugin: 'cc-side-context',
+    surface: 'desktop',
+    component: 'Pane',
+    requestId: PANE,
+    props: { title: 'Context', isFocused: false, bodyColumns: 40, placement: 'dock' } as never,
+  })
+  const drawn = JSON.stringify(await pane.drawn())
+  expect(drawn).toContain('font-weight=\\"600\\">Skills</tspan>')
+  expect(drawn).toContain('font-weight=\\"600\\">Conversation</tspan>')
+})
+
 test('with auto-compact off the bar counts towards the window', async ($, on) => {
   const b = usage.context.breakdown
   engine(on, { ...usage, context: { ...usage.context, breakdown: b && { ...b, isAutoCompactEnabled: false } } })
