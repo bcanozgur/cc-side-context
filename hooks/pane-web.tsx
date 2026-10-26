@@ -85,9 +85,11 @@ const LENS: MeterLens = { zoom: 4, tall: 1.5, width: 56 }
 // is handed the very string it already has
 const drawn = new WeakMap<Snapshot, Map<string, string>>()
 
-export const meterSource = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number; lens?: MeterLens }): string => {
+// `axis` adds a row under the meter naming its scale, as a number line: 0,
+// the limit under its mark, the window at the end
+export const meterSource = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number; lens?: MeterLens; axis?: boolean }): string => {
   const lens = m.lens ?? LENS
-  const key = `${m.delta}|${m.budget}|${m.W}|${m.BH}|${m.H}|${lens.zoom}|${lens.tall}|${lens.width}`
+  const key = `${m.delta}|${m.budget}|${m.W}|${m.BH}|${m.H}|${lens.zoom}|${lens.tall}|${lens.width}|${m.axis === true}`
   const known = drawn.get(m.snap)?.get(key)
   if (known !== undefined) return known
   const source = drawMeter(m, lens)
@@ -125,7 +127,13 @@ export const steadyMeter = (
   return source
 }
 
-const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number }, lens: MeterLens): string => {
+// The axis row's height in pixels, under the meter's own
+export const AXIS = 12
+
+// A figure on the axis, without a trailing .0: 250k, 1M
+const tickOf = (n: number) => fmt(n).replace(/\.0(?=[kM]?$)/, '')
+
+const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number; axis?: boolean }, lens: MeterLens): string => {
   const { snap, delta, budget, W, BH, H } = m
   const inUse = snap.rows.filter(r => r.kind === 'used')
   const conversation = inUse.find(r => /^messages/i.test(r.name))
@@ -275,13 +283,38 @@ const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number
     `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" fill="url(#sheen)"/></g>` +
     `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#000" stroke-opacity=".35" stroke-width="2.5"/>` +
     `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#fff" stroke-opacity=".95" stroke-width="1.25"/></g>`
+  // The scale: 0 at the start, the window at the end and the limit under its
+  // mark, in a grey that reads on a light pane and a dark one. The limit says
+  // more than the end, so a limit near an end takes its place
+  const figures = (() => {
+    if (!m.axis) return ''
+    const widthOf = (t: string) => t.length * 5.6
+    const ticks: { x: number; text: string; anchor: 'start' | 'middle' | 'end' }[] = [
+      { x: 0, text: '0', anchor: 'start' },
+      { x: x(snap.window), text: tickOf(snap.window), anchor: 'end' },
+    ]
+    if (isMarked) {
+      const text = tickOf(budget)
+      const half = widthOf(text) / 2
+      const at = Math.max(half, Math.min(W - half, mark))
+      const ends = ticks.filter(t => (t.anchor === 'start' ? widthOf(t.text) + 6 < at - half : t.x - widthOf(t.text) - 6 > at + half))
+      ticks.splice(0, ticks.length, ...ends, { x: at, text, anchor: 'middle' })
+    }
+    return ticks
+      .map(
+        t =>
+          `<text x="${t.x.toFixed(1)}" y="${H + AXIS - 2}" text-anchor="${t.anchor}" fill="#8e8e93" font-size="9" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif">${t.text}</text>`,
+      )
+      .join('')
+  })()
+  const VH = m.axis ? H + AXIS : H
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${VH}" preserveAspectRatio="none">` +
     `<style>${css}</style>` +
     `<defs><clipPath id="r"><rect width="${W}" height="${BH}" rx="${BH / 2}" ry="${BH / 2}"/></clipPath>${bar}` +
     `<clipPath id="lc"><rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7"/></clipPath>` +
     `<linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".42"/><stop offset=".45" stop-color="#fff" stop-opacity=".06"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>` +
-    `<use href="#bar" y="${top}"/>${columns}${glass}</svg>`
+    `<use href="#bar" y="${top}"/>${figures}${columns}${glass}</svg>`
   )
 }
 
@@ -390,14 +423,14 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     const BH = 20
     const H = 40
     const isMarked = budget < Math.max(snap.window, snap.tokens, 1)
-    const source = steadyMeter('pane', { snap, delta: d.live.delta, budget, W, BH, H }, { isRunning: d.isRunning === true, now: d.now })
+    const source = steadyMeter('pane', { snap, delta: d.live.delta, budget, W, BH, H, axis: true }, { isRunning: d.isRunning === true, now: d.now })
     return (
       <Box width="100%">
         <Svg
           source={source}
           alt={`${windowShare}% of the ${fmt(snap.window)} window in use${isMarked ? `, ${limitLabel} marked at ${fmt(budget)}` : ''}`}
           width={W}
-          height={H}
+          height={H + AXIS}
           isInteractive
         />
       </Box>

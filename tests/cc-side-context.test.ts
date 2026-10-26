@@ -485,6 +485,11 @@ test('on the page a 1M window fills the whole bar, the quality limit marked on i
   expect(drawn).toContain('6% of the 1.0M window in use, quality limit marked at 250.0k')
   // the mark sits a quarter of the way along
   expect(drawn).toContain('x=\\"98.0\\" width=\\"4\\"')
+  // under it a number line: 0, the limit under its mark, the window at the end
+  expect(drawn).toContain('text-anchor=\\"start\\" fill=\\"#8e8e93\\" font-size=\\"9\\"')
+  expect(drawn).toMatch(/x=\\"100\.0\\"[^>]*text-anchor=\\"middle\\"[^>]*>250k</)
+  expect(drawn).toMatch(/x=\\"400\.0\\"[^>]*text-anchor=\\"end\\"[^>]*>1M</)
+  expect(drawn).toContain('"height":52')
 })
 
 test('on the page a part thinner than a column is still named under the pointer', async ($, on) => {
