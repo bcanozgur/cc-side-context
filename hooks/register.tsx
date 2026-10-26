@@ -206,6 +206,9 @@ const remeasure = ($: EngineInterface, detail: Snapshot['detail'] = 'summary') =
   void scan($).catch(() => undefined)
 }
 
+// A turn of the main thread is running: the meters hold still meanwhile
+let isRunning = false
+
 // The strip above the prompt has drawn the meter: its parts come from the
 // breakdown, which is read on while it shows, the pane closed or not
 let stripShown = false
@@ -635,6 +638,7 @@ export const register: Register = (on, options) => {
       argumentHint: '[on|off|full|compact|handoff|stats|guards [clear]]',
     })
     await loadGuards($).catch(() => undefined)
+    isRunning = false
     // The terminal docks the pane; everywhere else the strip above the prompt
     // shows the context, and the pane opens from it
     if (e.surface === 'terminal' && !(await isDesktop($))) void open($)
@@ -795,6 +799,7 @@ export const register: Register = (on, options) => {
   // measures in between (a rate-limit window moving, the session's first);
   // the last turn's leaves the bar's end as this one starts
   on('turn.start', async ($, e, next) => {
+    isRunning = true
     await patch($, l => ({ last: l.snapshot?.tokens ?? l.last, delta: 0 }))
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -809,6 +814,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
+      isRunning = false
       const at = await $.clock.now()
       await patch($, l => ({ lastReply: at, warned: { ...l.warned, cold: false } }))
       await update($, tick, () => at)
@@ -873,6 +879,8 @@ export const register: Register = (on, options) => {
         quality,
         columns: e.props.bodyColumns,
         surface,
+        isRunning,
+        now: await $.clock.now(),
       },
       {
         details: () => void (isPaneOpen ? hide($) : show($)).catch(() => undefined),
@@ -899,6 +907,7 @@ export const register: Register = (on, options) => {
       rows: e.props.placement === 'dock' ? e.props.scroll?.bodyRows : undefined,
       quality,
       ttl: ttlOf(options, l.snapshot),
+      isRunning,
     }
     // Started once every read is in, so the figures it writes redraw the pane
     if (!l.snapshot) void measureOnce($).catch(() => undefined)

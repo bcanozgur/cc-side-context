@@ -99,6 +99,32 @@ export const meterSource = (m: { snap: Snapshot; delta: number; budget: number; 
   return source
 }
 
+// The desktop draws an interactive Svg as a frame of its own, and a changed
+// source is a new frame: the old one goes at once and the new one is blank
+// until it loads, and a pointer on the lens loses it. Every response of a turn
+// moves the figures, so while a turn runs the meter keeps what it last drew,
+// unless the context moved a stretch the eye would miss or it has been a
+// while; the turn's end draws it afresh. The figures beside it move each step.
+const HOLD = { ms: 20_000, share: 0.02 } as const
+const held = new Map<string, { source: string; tokens: number; W: number; at: number }>()
+
+export const steadyMeter = (
+  slot: string,
+  m: Parameters<typeof meterSource>[0],
+  turn: { isRunning: boolean; now: number },
+): string => {
+  const source = meterSource(m)
+  const last = held.get(slot)
+  if (last === undefined || last.source === source) {
+    if (last === undefined) held.set(slot, { source, tokens: m.snap.tokens, W: m.W, at: turn.now })
+    return source
+  }
+  const isSmall = Math.abs(m.snap.tokens - last.tokens) < Math.max(1, m.snap.window) * HOLD.share
+  if (turn.isRunning && isSmall && last.W === m.W && turn.now - last.at < HOLD.ms) return last.source
+  held.set(slot, { source, tokens: m.snap.tokens, W: m.W, at: turn.now })
+  return source
+}
+
 const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number }, lens: MeterLens): string => {
   const { snap, delta, budget, W, BH, H } = m
   const inUse = snap.rows.filter(r => r.kind === 'used')
@@ -172,7 +198,10 @@ const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number
   const LHt = Math.min(H - 2, BH * lens.tall + 4)
   // The readout: a dark tag beside the lens naming the part and its size, at
   // once rather than after a tooltip's delay. One tag per distinct reading,
-  // drawn on either side of the lens so it hides none of it
+  // drawn on either side of the lens so it hides none of it. Where neither
+  // side has room for the whole reading it sheds words until it fits: the
+  // overage note, then the size; a part past the limit then shows its size in
+  // red instead. The lens is drawn over the tag, so the bar never hides
   const LH = 18
   const gap = LW / 2 + 4
   const tagWidth = (t: string) => Math.ceil(t.length * 6) + 26
@@ -183,7 +212,16 @@ const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number
     // Where the lens's middle sits: under the pointer, but never past an end
     const lensAt = Math.max(LW / 2, Math.min(W - LW / 2, mid))
     const p = partAt(i)
-    const text = `${p.name}  ${p.size}${p.isPast ? '  · over the limit' : ''}`
+    const room = Math.max(W - lensAt - gap, lensAt - gap)
+    const forms = [
+      { size: true, note: p.isPast ? '  · over the limit' : '' },
+      { size: true, note: p.isPast ? '  · over' : '' },
+      { size: true, note: '' },
+      { size: false, note: '' },
+    ]
+    const textOf = (f: (typeof forms)[number]) => `${p.name}${f.size ? `  ${p.size}` : ''}${f.note}`
+    const form = forms.find(f => tagWidth(textOf(f)) <= room) ?? (forms[forms.length - 1] as (typeof forms)[number])
+    const text = textOf(form)
     const w = tagWidth(text)
     // The side with room, else the roomier one, kept inside the bar
     const isRight = lensAt + gap + w <= W || (lensAt - gap - w < 0 && W - lensAt >= lensAt)
@@ -192,13 +230,15 @@ const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number
     if (!tagOf.has(key)) {
       const n = tagOf.size
       tagOf.set(key, n)
+      const isRed = p.isPast && !form.note
       tags.push(
         `<g class="t" id="t${n}" transform="translate(${x0} ${(H - LH) / 2})">` +
           `<rect width="${w}" height="${LH}" rx="${LH / 2}" fill="#1c1c1e" fill-opacity=".9" stroke="#ffffff" stroke-opacity=".14"/>` +
           `<circle cx="10" cy="${LH / 2}" r="3.5" fill="${p.color}"/>` +
           `<text x="18" y="${LH / 2 + 3.5}" fill="#f5f5f7" font-size="10" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif" xml:space="preserve">` +
-          `<tspan font-weight="600">${p.name}</tspan><tspan fill-opacity=".72">  ${p.size}</tspan>` +
-          (p.isPast ? `<tspan fill="#ff8a80">  · over the limit</tspan>` : '') +
+          `<tspan font-weight="600">${p.name}</tspan>` +
+          (form.size ? (isRed ? `<tspan fill="#ff8a80">  ${p.size}</tspan>` : `<tspan fill-opacity=".72">  ${p.size}</tspan>`) : '') +
+          (form.note ? `<tspan fill="#ff8a80">${form.note}</tspan>` : '') +
           `</text></g>`,
       )
     }
@@ -229,13 +269,12 @@ const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number
   // would have to recompute on every frame of the glide
   const ly = (H - LHt) / 2
   const glass =
-    `<g id="lens">` +
+    `<g id="lens">${tags.join('')}` +
     `<g clip-path="url(#lc)"><rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" fill="#1c1c1e"/>` +
     `<g class="z"><use href="#bar" y="${top}"/></g>` +
     `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" fill="url(#sheen)"/></g>` +
     `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#000" stroke-opacity=".35" stroke-width="2.5"/>` +
-    `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#fff" stroke-opacity=".95" stroke-width="1.25"/>` +
-    `${tags.join('')}</g>`
+    `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#fff" stroke-opacity=".95" stroke-width="1.25"/></g>`
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
     `<style>${css}</style>` +
@@ -351,7 +390,7 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
     const BH = 20
     const H = 40
     const isMarked = budget < Math.max(snap.window, snap.tokens, 1)
-    const source = meterSource({ snap, delta: d.live.delta, budget, W, BH, H })
+    const source = steadyMeter('pane', { snap, delta: d.live.delta, budget, W, BH, H }, { isRunning: d.isRunning === true, now: d.now })
     return (
       <Box width="100%">
         <Svg

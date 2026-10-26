@@ -48,7 +48,7 @@ export const statusOf = (snap: Snapshot, quality: number, compacting: boolean): 
   const isQualityFirst = budget < (snap.compactAt ?? snap.window)
   const pressure = budget > 0 ? snap.tokens / budget : 0
   if (compacting) return { color: 'claude', text: 'Compacting', pressure }
-  if (pressure >= 1) return { color: 'error', text: 'Over the limit', pressure }
+  if (pressure >= 1) return { color: 'error', text: 'Over', pressure }
   if (pressure >= 0.8) return { color: 'error', text: isQualityFirst ? 'Time to compact' : 'Near auto-compact', pressure }
   if (pressure >= 0.5) return { color: 'warning', text: 'Filling up', pressure }
   return { color: 'success', text: 'Healthy', pressure }
@@ -153,6 +153,8 @@ export type PaneData = {
   quality: number
   // How long the prompt cache lives, in ms
   ttl: number
+  // Whether a turn of the main thread is running, so the meter holds still
+  isRunning?: boolean
 }
 
 export type PaneActions = {

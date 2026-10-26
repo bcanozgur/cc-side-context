@@ -1,7 +1,7 @@
 import type { Snapshot } from '../types'
 import { fmt } from './analysis'
 import { type Ui, barOf, budgetOf, statusOf } from './pane'
-import { meterSource } from './pane-web'
+import { steadyMeter } from './pane-web'
 
 // The strip above the prompt: one row with the verdict, the fill and the room
 // left, so the context can be watched without the pane taking a column. The
@@ -17,6 +17,9 @@ export type StripData = {
   quality: number
   columns: number
   surface: string
+  // Whether a turn of the main thread is running, so the meter holds still
+  isRunning: boolean
+  now: number
 }
 
 export type StripActions = {
@@ -73,7 +76,7 @@ export const drawStrip = (ui: Ui, d: StripData, actions: StripActions) => {
       return (
         <Box key="meter" flexShrink={0} marginX={1}>
           <Svg
-            source={meterSource({ snap, delta: d.delta, budget, W, ...METER, lens: LENS })}
+            source={steadyMeter('strip', { snap, delta: d.delta, budget, W, ...METER, lens: LENS }, { isRunning: d.isRunning, now: d.now })}
             alt={`${share}% of the ${fmt(snap.window)} window in use, limit at ${fmt(budget)}`}
             width={W}
             height={METER.H}
@@ -104,9 +107,11 @@ export const drawStrip = (ui: Ui, d: StripData, actions: StripActions) => {
     <Box width="100%" justifyContent="space-between" alignItems="center">
       <Box flexShrink={1} minWidth={0} overflow="hidden" alignItems="center">
         <Text color={status.color}>{'● '}</Text>
-        <Text bold wrap="truncate-end">
-          {status.text}
-        </Text>
+        <Box flexShrink={isWeb ? 0 : 1} minWidth={0}>
+          <Text bold wrap="truncate-end">
+            {status.text}
+          </Text>
+        </Box>
         <Box flexShrink={0} marginLeft={1}>
           <Text bold>{`${share}%`}</Text>
         </Box>

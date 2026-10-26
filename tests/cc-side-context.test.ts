@@ -1106,6 +1106,30 @@ test('on the terminal the strip steps aside for the docked pane, and draws its b
   expect(JSON.stringify(await band.drawn())).not.toContain('Healthy')
 })
 
+test('while a turn runs the strip keeps its meter, so the page does not reload its frame each step', async ($, on) => {
+  const current: SessionUsage = { ...usage, context: { ...usage.context } }
+  const { clock } = engine(on, current)
+  await $.session.start({ ...START, surface: 'desktop' })
+  const band = await strip($, 'desktop')
+  await clock.settle()
+  const svgOf = async () => JSON.stringify(await band.drawn()).match(/"source":"(.*?)","alt"/)?.[1]
+  const before = await svgOf()
+  expect(before).toBeDefined()
+
+  // a step of a few hundred tokens moves the figures, not the meter
+  await $.turn.start({ text: 'Add retries', turnId: 'turn' })
+  current.context = { ...usage.context, tokens: 84_600 }
+  await step($, 0)
+  await clock.settle()
+  expect(JSON.stringify(await band.drawn())).toContain('84.6k of 167.0k')
+  expect(await svgOf()).toBe(before)
+
+  // the turn's end draws it afresh
+  await $.turn.complete(turn)
+  await clock.settle()
+  expect(await svgOf()).not.toBe(before)
+})
+
 test('the strip offers Compact once the context nears the limit', async ($, on) => {
   const full: SessionUsage = { ...usage, context: { ...usage.context, tokens: 150_000, percent: 75 } }
   const { clock } = engine(on, full)
