@@ -30,9 +30,9 @@ const EATERS = 3
 
 // Each part of the context has a colour of its own, shared by its dot and its
 // stretch of the meter, in the host's own hues where it has one (tools blue,
-// MCP orange, messages green, the system prompt amber). The meter is an Svg,
-// drawn as an image that cannot follow the theme: mid tones that read on a
-// light and a dark pane alike.
+// MCP orange, messages green, the system prompt amber). The meter's colours
+// are fixed, not the theme's: mid tones that read on a light and a dark pane
+// alike.
 const PART: Record<string, string> = {
   Conversation: '#3fa877',
   'Built-in tools': '#4f86e8',
@@ -70,10 +70,10 @@ const shareOf = (part: number, whole: number) => {
 // with a tag beside it naming the part. The frame runs no script, so the lens
 // follows the pointer by CSS :hover on thin transparent columns over the bar.
 // It is one layer that only moves (transform and opacity, which the page
-// composites without repainting the rest): the bar under it is drawn once,
-// exactly as at rest, and the lens shows a magnified copy of that same bar.
-// No selector looks back at earlier siblings and nothing is filtered, so a
-// pointer move restyles two elements, not the whole drawing.
+// composites without repainting the rest), and shows a magnified copy of the
+// bar the frame keeps unseen. No selector looks back at earlier siblings and
+// nothing is filtered, so a pointer move restyles two elements, not the whole
+// drawing. The bar itself is the page's own boxes (meterBox).
 
 // `zoom` is how many times wider the bar shows under the lens, `tall` how many
 // times taller, and `width` the lens's own width in pixels
@@ -85,11 +85,9 @@ const LENS: MeterLens = { zoom: 4, tall: 1.5, width: 56 }
 // is handed the very string it already has
 const drawn = new WeakMap<Snapshot, Map<string, string>>()
 
-// `axis` adds a row under the meter naming its scale, as a number line: 0,
-// the limit under its mark, the window at the end
-export const meterSource = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number; lens?: MeterLens; axis?: boolean }): string => {
+export const meterSource = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number; lens?: MeterLens }): string => {
   const lens = m.lens ?? LENS
-  const key = `${m.delta}|${m.budget}|${m.W}|${m.BH}|${m.H}|${lens.zoom}|${lens.tall}|${lens.width}|${m.axis === true}`
+  const key = `${m.delta}|${m.budget}|${m.W}|${m.BH}|${m.H}|${lens.zoom}|${lens.tall}|${lens.width}`
   const known = drawn.get(m.snap)?.get(key)
   if (known !== undefined) return known
   const source = drawMeter(m, lens)
@@ -102,11 +100,11 @@ export const meterSource = (m: { snap: Snapshot; delta: number; budget: number; 
 }
 
 // The desktop draws an interactive Svg as a frame of its own, and a changed
-// source is a new frame: the old one goes at once and the new one is blank
-// until it loads, and a pointer on the lens loses it. Every response of a turn
-// moves the figures, so while a turn runs the meter keeps what it last drew,
-// unless the context moved a stretch the eye would miss or it has been a
-// while; the turn's end draws it afresh. The figures beside it move each step.
+// source is a new frame, blank until it loads, which a pointer on the lens
+// loses. Every response of a turn moves the figures, so while a turn runs the
+// lens keeps what it last drew, unless the context moved a stretch the eye
+// would miss or it has been a while; the turn's end draws it afresh. The bar
+// and the figures beside it move each step.
 const HOLD = { ms: 20_000, share: 0.02 } as const
 const held = new Map<string, { source: string; tokens: number; W: number; at: number }>()
 
@@ -127,21 +125,13 @@ export const steadyMeter = (
   return source
 }
 
-// The axis row's height in pixels, under the meter's own
-export const AXIS = 12
-
-// A figure on the axis, without a trailing .0: 250k, 1M
-const tickOf = (n: number) => fmt(n).replace(/\.0(?=[kM]?$)/, '')
-
-const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number; axis?: boolean }, lens: MeterLens): string => {
-  const { snap, delta, budget, W, BH, H } = m
+// The parts along the meter in tokens, the setup largest first, then the
+// conversation and the latest turn; and the whole the meter spans
+const partsOf = (snap: Snapshot, delta: number) => {
   const inUse = snap.rows.filter(r => r.kind === 'used')
   const conversation = inUse.find(r => /^messages/i.test(r.name))
   const setup = inUse.filter(r => r !== conversation).sort((a, b) => b.tokens - a.tokens)
   const total = inUse.reduce((sum, r) => sum + r.tokens, 0)
-  const top = (H - BH) / 2
-  const span = Math.max(snap.window, snap.tokens, 1)
-  const x = (tokens: number) => Math.max(0, Math.min(W, (tokens / span) * W))
   // The rows are an estimate of the same whole: scaled to the measured total
   const ratio = total > 0 ? snap.tokens / total : 0
   const turn = Math.max(0, Math.min(delta, (conversation?.tokens ?? 0) * ratio))
@@ -150,6 +140,14 @@ const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number
     ...(conversation ? [{ name: 'Conversation', tokens: conversation.tokens * ratio - turn, color: colorOf(conversation.name) }] : []),
     ...(conversation && turn > 0 ? [{ name: 'Latest turn', tokens: turn, color: lighter(colorOf(conversation.name)) }] : []),
   ].filter(p => p.tokens > 0)
+  return { parts, span: Math.max(snap.window, snap.tokens, 1) }
+}
+
+const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number; BH: number; H: number }, lens: MeterLens): string => {
+  const { snap, delta, budget, W, BH, H } = m
+  const top = (H - BH) / 2
+  const { parts, span } = partsOf(snap, delta)
+  const x = (tokens: number) => Math.max(0, Math.min(W, (tokens / span) * W))
   let at = 0
   const spans = parts.map(p => {
     const from = at
@@ -283,44 +281,126 @@ const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number
     `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" fill="url(#sheen)"/></g>` +
     `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#000" stroke-opacity=".35" stroke-width="2.5"/>` +
     `<rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7" fill="none" stroke="#fff" stroke-opacity=".95" stroke-width="1.25"/></g>`
-  // The scale: 0 at the start, the window at the end and the limit under its
-  // mark, in a grey that reads on a light pane and a dark one. The limit says
-  // more than the end, so a limit near an end takes its place
-  const figures = (() => {
-    if (!m.axis) return ''
-    const widthOf = (t: string) => t.length * 5.6
-    const ticks: { x: number; text: string; anchor: 'start' | 'middle' | 'end' }[] = [
-      { x: 0, text: '0', anchor: 'start' },
-      { x: x(snap.window), text: tickOf(snap.window), anchor: 'end' },
-    ]
-    if (isMarked) {
-      const text = tickOf(budget)
-      const half = widthOf(text) / 2
-      const at = Math.max(half, Math.min(W - half, mark))
-      const ends = ticks.filter(t => (t.anchor === 'start' ? widthOf(t.text) + 6 < at - half : t.x - widthOf(t.text) - 6 > at + half))
-      ticks.splice(0, ticks.length, ...ends, { x: at, text, anchor: 'middle' })
-    }
-    return ticks
-      .map(
-        t =>
-          `<text x="${t.x.toFixed(1)}" y="${H + AXIS - 2}" text-anchor="${t.anchor}" fill="#8e8e93" font-size="9" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif">${t.text}</text>`,
-      )
-      .join('')
-  })()
-  const VH = m.axis ? H + AXIS : H
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${VH}" preserveAspectRatio="none">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">` +
     `<style>${css}</style>` +
     `<defs><clipPath id="r"><rect width="${W}" height="${BH}" rx="${BH / 2}" ry="${BH / 2}"/></clipPath>${bar}` +
     `<clipPath id="lc"><rect x="${-LW / 2}" y="${ly}" width="${LW}" height="${LHt}" rx="7"/></clipPath>` +
     `<linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".42"/><stop offset=".45" stop-color="#fff" stop-opacity=".06"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient></defs>` +
-    `<use href="#bar" y="${top}"/>${figures}${columns}${glass}</svg>`
+    `${columns}${glass}</svg>`
+  )
+}
+
+// A part's colour past the limit: under a faint red veil, so the list's
+// colours still read and the overage still shows
+const veiled = (hex: string): string =>
+  '#' + [1, 3, 5].map(i => Math.round(parseInt(hex.slice(i, i + 2), 16) * 0.65 + parseInt(HEX.error.slice(i, i + 2), 16) * 0.35).toString(16).padStart(2, '0')).join('')
+// The track, and the room past the limit a shade stronger
+const TRACK = { before: '#80808033', past: '#80808043' } as const
+
+// A figure on the scale, without a trailing .0: 250k, 1M
+const tickOf = (n: number) => fmt(n).replace(/\.0(?=[kM]?$)/, '')
+
+// A drawing that only sizes its box, the same markup every time: the page
+// keeps it as it is
+const spacerOf = (W: number, H: number) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}"/>`
+
+// The meter as the page draws it. The bar is the page's own boxes, which
+// redraw in place as the figures move; the lens is a frame over it shown only
+// under the pointer, since a changed drawing is a new frame, blank (opaque on
+// a dark page) until it loads, and the bar would blink with every response.
+// Under the bar its scale, a number line in the page's own type: 0, the limit
+// from its mark, the window at the end, a figure dropped where two would meet.
+// `columns` is the meter's width in the page's cells, to tell where they meet.
+export const meterBox = (
+  ui: Ui,
+  m: Parameters<typeof meterSource>[0] & { slot: 'pane' | 'strip'; isFull: boolean; columns: number; alt: string; turn: { isRunning: boolean; now: number } },
+) => {
+  const { Box, Text } = ui
+  const Svg = 'Svg' in ui ? ui.Svg : undefined
+  if (!Svg) return undefined
+  const { snap, budget, W, BH, H } = m
+  const { parts, span } = partsOf(snap, m.delta)
+  const isMarked = budget < span
+  const cut = isMarked ? budget : span
+  // Lengths share the row as flex weights: the page takes a percentage only
+  // in whole numbers, too coarse for a sliver
+  const weight = (tokens: number) => +((Math.max(0, tokens) / span) * 1000).toFixed(3)
+
+  type Piece = { from: number; to: number; color: string; isPart: boolean }
+  let at = 0
+  const pieces: Piece[] = parts.map(p => ({ from: at, to: (at += p.tokens), color: p.color, isPart: true }))
+  if (at < span) pieces.push({ from: at, to: span, color: TRACK.before, isPart: false })
+  const before = pieces.filter(p => p.from < cut).map(p => ({ ...p, to: Math.min(p.to, cut) }))
+  const past = pieces.filter(p => p.to > cut).map(p => ({ ...p, from: Math.max(p.from, cut), color: p.isPart ? veiled(p.color) : TRACK.past }))
+  // A part of 1k or more is never thinner than a sliver
+  const piece = (p: Piece) => (
+    <Box width={0} flexGrow={weight(p.to - p.from)} minWidth={p.isPart && p.to - p.from >= 1_000 ? 0.2 : 0} height="100%" backgroundColor={p.color} />
+  )
+  // The mark is a separator: a dark gap with a light line down its middle, so
+  // it reads against any part colour on either side
+  const mark = (
+    <Box flexShrink={0} width={0.5} height="100%" backgroundColor="#00000099" justifyContent="center">
+      <Box width={0.2} height="100%" backgroundColor="#e6e6e6" />
+    </Box>
+  )
+  const scope = `side-context-meter-${m.slot}`
+  const lens = steadyMeter(m.slot, m, m.turn)
+
+  const tick = (text: string) => <Text dimColor wrap="truncate">{text}</Text>
+  const end = tickOf(snap.window)
+  const limit = tickOf(budget)
+  // The limit's figure leans on its mark from the side with room: after it
+  // with the window's past it, else before it, else alone at the end
+  const left = (cut / span) * m.columns
+  const right = m.columns - left
+  const side = right >= limit.length + end.length + 2 ? 'after' : left >= limit.length + 3 ? 'before' : 'end'
+  const scale = isMarked ? (
+    <Box width="100%">
+      <Box width={0} flexGrow={weight(cut)} minWidth={0} justifyContent="space-between">
+        {left >= 2 && tick('0')}
+        {side === 'before' && tick(limit)}
+      </Box>
+      <Box
+        width={0}
+        flexGrow={weight(span - cut)}
+        minWidth={side === 'end' ? limit.length + 1 : 0}
+        justifyContent={side === 'after' ? 'space-between' : 'flex-end'}
+        paddingLeft={side === 'before' ? 1 : 0}
+      >
+        {side !== 'before' && tick(limit)}
+        {side !== 'end' && right >= end.length + 1 && tick(end)}
+      </Box>
+    </Box>
+  ) : (
+    <Box width="100%" justifyContent="space-between">
+      {tick('0')}
+      {tick(end)}
+    </Box>
+  )
+
+  return (
+    <Box flexDirection="column" width={m.isFull ? '100%' : undefined} flexShrink={0}>
+      <Box width={m.isFull ? '100%' : undefined} hover={{ scope, backgroundColor: '#00000000' }}>
+        <Svg source={spacerOf(W, H)} alt={m.alt} width={W} height={H} />
+        <Box position="absolute" top={0} bottom={0} left={0} right={0} flexDirection="column" justifyContent="center">
+          <Box width="100%" height={`${Math.round((BH / H) * 100)}%`} overflow="hidden" borderStyle="round" borderColor="#00000000" padding={0}>
+            {before.map(piece)}
+            {isMarked && mark}
+            {past.map(piece)}
+          </Box>
+        </Box>
+        <Box position="absolute" top={0} bottom={0} left={0} right={0} display="none" hover={{ scope, display: 'flex' }}>
+          <Svg source={lens} alt={m.alt} width={W} height={H} isInteractive />
+        </Box>
+      </Box>
+      {scale}
+    </Box>
   )
 }
 
 export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
   const { Box, Text, Button } = ui
-  const Svg = 'Svg' in ui ? ui.Svg : undefined
   // A flex child that may shrink below its text, so the text truncates
   // instead of pushing the number out of the pane
   const clip = { minWidth: 0, overflow: 'hidden' as const }
@@ -415,24 +495,25 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
       </Box>
     ) : undefined
 
-  // The meter, its lens under the pointer (meterSource)
+  // The meter, its lens under the pointer and its scale under it (meterBox).
+  // Drawn wider than the card, so the page fits it to the card's width
   const meter = () => {
-    if (!Svg) return undefined
-    const W = Math.max(160, d.columns * 10)
-    // Room above and below the bar for the lens
-    const BH = 20
-    const H = 40
     const isMarked = budget < Math.max(snap.window, snap.tokens, 1)
-    const source = steadyMeter('pane', { snap, delta: d.live.delta, budget, W, BH, H, axis: true }, { isRunning: d.isRunning === true, now: d.now })
     return (
       <Box width="100%">
-        <Svg
-          source={source}
-          alt={`${windowShare}% of the ${fmt(snap.window)} window in use${isMarked ? `, ${limitLabel} marked at ${fmt(budget)}` : ''}`}
-          width={W}
-          height={H + AXIS}
-          isInteractive
-        />
+        {meterBox(ui, {
+          slot: 'pane',
+          snap,
+          delta: d.live.delta,
+          budget,
+          W: Math.max(160, d.columns * 9),
+          BH: 20,
+          H: 40,
+          isFull: true,
+          columns: Math.max(10, d.columns - 4),
+          alt: `${windowShare}% of the ${fmt(snap.window)} window in use${isMarked ? `, ${limitLabel} marked at ${fmt(budget)}` : ''}`,
+          turn: { isRunning: d.isRunning === true, now: d.now },
+        })}
       </Box>
     )
   }

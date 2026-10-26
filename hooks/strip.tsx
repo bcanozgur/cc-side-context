@@ -1,7 +1,7 @@
 import type { Snapshot } from '../types'
 import { fmt } from './analysis'
 import { type Ui, barOf, budgetOf, statusOf } from './pane'
-import { steadyMeter } from './pane-web'
+import { meterBox } from './pane-web'
 
 // The strip above the prompt: one row with the verdict, the fill and the room
 // left, so the context can be watched without the pane taking a column. The
@@ -34,12 +34,12 @@ const cellsOf = (columns: number) => Math.max(16, Math.min(40, Math.round(column
 // The lens is broader and stronger than the pane's: the bar is short
 const METER = { BH: 10, H: 28 } as const
 const LENS = { zoom: 5, tall: 1.8, width: 72 } as const
-// Its width in pixels, from the room the strip has
-const meterWidth = (columns: number) => Math.max(240, Math.min(520, columns * 4))
+// Its width in pixels, from the room the strip has: what the row's words and
+// buttons leave of it, in cells some seven pixels wide at the least
+const meterWidth = (columns: number, taken: number) => Math.max(160, Math.min(520, columns * 4, (columns - taken) * 7))
 
 export const drawStrip = (ui: Ui, d: StripData, actions: StripActions) => {
   const { Box, Text, Button } = ui
-  const Svg = 'Svg' in ui ? ui.Svg : undefined
   const isWeb = d.surface !== 'terminal'
   const snap = d.snapshot
   // The terminal draws a bracketed button in the accent colour; there the
@@ -71,17 +71,24 @@ export const drawStrip = (ui: Ui, d: StripData, actions: StripActions) => {
 
   const meter = () => {
     if (isWeb) {
-      if (!Svg) return undefined
-      const W = meterWidth(d.columns)
+      // The verdict and its share, the buttons, the gaps between
+      const W = meterWidth(d.columns, status.text.length + 8 + (canCompact ? 12 : 0) + 18)
       return (
-        <Box key="meter" flexShrink={0} marginX={1}>
-          <Svg
-            source={steadyMeter('strip', { snap, delta: d.delta, budget, W, ...METER, lens: LENS }, { isRunning: d.isRunning, now: d.now })}
-            alt={`${share}% of the ${fmt(snap.window)} window in use, limit at ${fmt(budget)}`}
-            width={W}
-            height={METER.H}
-            isInteractive
-          />
+        <Box flexShrink={0} marginX={1}>
+          {meterBox(ui, {
+            slot: 'strip',
+            snap,
+            delta: d.delta,
+            budget,
+            W,
+            ...METER,
+            lens: LENS,
+            isFull: false,
+            // The page's cells are some eight pixels wide
+            columns: W / 8,
+            alt: `${share}% of the ${fmt(snap.window)} window in use, limit at ${fmt(budget)}`,
+            turn: { isRunning: d.isRunning, now: d.now },
+          })}
         </Box>
       )
     }

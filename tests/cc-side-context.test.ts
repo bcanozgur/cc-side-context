@@ -483,13 +483,15 @@ test('on the page a 1M window fills the whole bar, the quality limit marked on i
   expect(drawn).toContain('Quality limit 250.0k')
   expect(drawn).toContain('186.0k left')
   expect(drawn).toContain('6% of the 1.0M window in use, quality limit marked at 250.0k')
-  // the mark sits a quarter of the way along
-  expect(drawn).toContain('x=\\"98.0\\" width=\\"4\\"')
-  // under it a number line: 0, the limit under its mark, the window at the end
-  expect(drawn).toContain('text-anchor=\\"start\\" fill=\\"#8e8e93\\" font-size=\\"9\\"')
-  expect(drawn).toMatch(/x=\\"100\.0\\"[^>]*text-anchor=\\"middle\\"[^>]*>250k</)
-  expect(drawn).toMatch(/x=\\"400\.0\\"[^>]*text-anchor=\\"end\\"[^>]*>1M</)
-  expect(drawn).toContain('"height":52')
+  // the mark sits a quarter of the way along, on the lens's bar and the page's
+  expect(drawn).toContain('x=\\"88.0\\" width=\\"4\\"')
+  expect(drawn).toContain('"flexGrow":186,"minWidth":0,"height":"100%","backgroundColor":"#80808033"}},{"type":"Box","props":{"flexShrink":0,"width":0.5')
+  expect(drawn).toContain('"flexGrow":750,"minWidth":0,"height":"100%","backgroundColor":"#80808043"')
+  // under it a number line in the page's own type: 0, the limit from its
+  // mark, the window at the end
+  const tick = (text: string) => `{"type":"Text","props":{"dimColor":true,"wrap":"truncate"},"children":["${text}"]}`
+  expect(drawn).toContain(`"flexGrow":250,"minWidth":0,"justifyContent":"space-between"},"children":[${tick('0')}]}`)
+  expect(drawn).toContain(`"justifyContent":"space-between","paddingLeft":0},"children":[${tick('250k')},${tick('1M')}]}`)
 })
 
 test('on the page a part thinner than a column is still named under the pointer', async ($, on) => {
@@ -1066,6 +1068,11 @@ test('off the terminal the strip shows the context and opens the pane on demand'
   // the whole window, the room left in it named under the lens too
   expect(drawn).toContain('42% of the 200.0k window in use, limit at 167.0k')
   expect(drawn).toContain('>Free</tspan>')
+  // its scale: the limit near the end leans on its mark from before it, so
+  // the window's figure keeps the end
+  const tick = (text: string) => `{"type":"Text","props":{"dimColor":true,"wrap":"truncate"},"children":["${text}"]}`
+  expect(drawn).toContain(`"justifyContent":"space-between"},"children":[${tick('0')},${tick('167k')}]}`)
+  expect(drawn).toContain(`"paddingLeft":1},"children":[${tick('200k')}]}`)
   expect(drawn).toContain('"label":"Details"')
   expect(drawn).not.toContain('"key":"compact"')
 
@@ -1111,22 +1118,28 @@ test('on the terminal the strip steps aside for the docked pane, and draws its b
   expect(JSON.stringify(await band.drawn())).not.toContain('Healthy')
 })
 
-test('while a turn runs the strip keeps its meter, so the page does not reload its frame each step', async ($, on) => {
+test('the strip bar moves with each step, its lens frame shown only under the pointer and held while a turn runs', async ($, on) => {
   const current: SessionUsage = { ...usage, context: { ...usage.context } }
   const { clock } = engine(on, current)
   await $.session.start({ ...START, surface: 'desktop' })
   const band = await strip($, 'desktop')
   await clock.settle()
-  const svgOf = async () => JSON.stringify(await band.drawn()).match(/"source":"(.*?)","alt"/)?.[1]
+  const svgOf = async () => [...JSON.stringify(await band.drawn()).matchAll(/"source":"(.*?)","alt"/g)].map(m => m[1]).find(s => s?.includes('lens'))
   const before = await svgOf()
   expect(before).toBeDefined()
+  // the page's own boxes draw the bar; the frame waits, hidden, for the pointer
+  let drawn = JSON.stringify(await band.drawn())
+  expect(drawn).toContain('"display":"none"},"hover":{"scope":"side-context-meter-strip","display":"flex"}')
+  const bar = drawn.match(/"flexGrow":[\d.]+/g)?.join()
 
   // a step of a few hundred tokens moves the figures, not the meter
   await $.turn.start({ text: 'Add retries', turnId: 'turn' })
   current.context = { ...usage.context, tokens: 84_600 }
   await step($, 0)
   await clock.settle()
-  expect(JSON.stringify(await band.drawn())).toContain('84.6k of 167.0k')
+  drawn = JSON.stringify(await band.drawn())
+  expect(drawn).toContain('84.6k of 167.0k')
+  expect(drawn.match(/"flexGrow":[\d.]+/g)?.join()).not.toBe(bar)
   expect(await svgOf()).toBe(before)
 
   // the turn's end draws it afresh
