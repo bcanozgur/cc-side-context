@@ -634,9 +634,11 @@ const handoff = async ($: EngineInterface): Promise<string> => {
   return `Handoff written to ${HANDOFF}. Run /clear, then paste (copied): ${RESUME}`
 }
 
+// A toast is one line: the path and the copied line do not fit, the step does
 const handoffPressed = async ($: EngineInterface) => {
   try {
-    $.ui.toast(await handoff($), { timeoutMs: 10_000 })
+    await handoff($)
+    $.ui.toast('Handoff saved · /clear, then paste (copied)', { timeoutMs: 10_000 })
   } catch (err) {
     $.ui.toast(`Could not write the handoff: ${reasonOf(err)}`, { timeoutMs: 10_000 })
   }

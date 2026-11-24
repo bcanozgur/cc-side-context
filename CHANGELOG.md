@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.1 · 2026-11-24
+
+- **The handoff toast fits on one line.** Pressing `w` says `Handoff saved · /clear, then paste (copied)`; the path and the copied line were cut off. `/side-context handoff` still prints both.
+
 ## 0.10.0 · 2026-11-24
 
 **New: a context strip above the prompt**

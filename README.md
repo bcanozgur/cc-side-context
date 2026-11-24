@@ -2,7 +2,7 @@
 
 **See what is eating your Claude Code context, and fix it in one key.**
 
-[![Claude Code mod](https://img.shields.io/badge/Claude_Code-mod-d97757)](https://code.claude.com/docs/en/plugins/mods/overview) [![Version](https://img.shields.io/badge/version-0.10.0-2c84db)](CHANGELOG.md) [![License: MIT](https://img.shields.io/badge/license-MIT-3fa877)](LICENSE)
+[![Claude Code mod](https://img.shields.io/badge/Claude_Code-mod-d97757)](https://code.claude.com/docs/en/plugins/mods/overview) [![Version](https://img.shields.io/badge/version-0.10.1-2c84db)](CHANGELOG.md) [![License: MIT](https://img.shields.io/badge/license-MIT-3fa877)](LICENSE)
 
 A [Claude Code](https://claude.com/claude-code) mod with two parts. A live side pane shows which tool outputs fill your context window, when your prompt cache goes cold, and when a long conversation has started to lose track. A one-row strip above the prompt shows the same at a glance. When it is time to act, one key does it: compact while keeping your decisions, hand off to a fresh session, or guard the file that keeps eating your context.
 
