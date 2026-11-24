@@ -373,6 +373,9 @@ test('compaction is told to keep decisions and the files changed', async ($, on)
   expect(told[1]?.split('Keep in the summary').length).toBe(2)
 })
 
+// On Windows the test host hands the paths over with backslashes
+const slashed = (p: string) => p.replace(/\\/g, '/')
+
 test('handoff writes a note a fresh session can start from', async ($, on) => {
   engine(on)
   const written: { path: string; text: string }[] = []
@@ -389,7 +392,7 @@ test('handoff writes a note a fresh session can start from', async ($, on) => {
 
   const result = await $.command.run(run('handoff'))
   expect(result.text).toContain('.claude/side-context/handoff.md')
-  expect(written[0]?.path.endsWith('.claude/side-context/handoff.md')).toBe(true)
+  expect(slashed(written[0]?.path ?? '').endsWith('.claude/side-context/handoff.md')).toBe(true)
   const note = written[0]?.text ?? ''
   expect(note).toContain('## Goal')
   expect(note).toContain('Add retries to the fetch client')
@@ -953,8 +956,6 @@ test('a resumed session still knows the goal from before its compaction', async 
   expect(note).not.toContain('Summary of the earlier work')
 })
 
-const slashed = (p: string) => p.replace(/\\/g, '/')
-
 test('the handoff keeps itself out of git and keeps the note before it', async ($, on) => {
   engine(on)
   const written: { path: string; text: string }[] = []
@@ -966,7 +967,6 @@ test('the handoff keeps itself out of git and keeps the note before it', async (
   on('fs.exists', () => ({ value: false }))
   await $.session.start(START)
   await $.command.run(run('handoff'))
-  // on Windows the test host hands the paths over with backslashes
   const paths = written.map(w => slashed(w.path))
   expect(paths.some(p => p.endsWith('.claude/side-context/handoff.md'))).toBe(true)
   expect(written.find(w => slashed(w.path).endsWith('handoff.prev.md'))?.text).toBe('# Handoff · earlier')
