@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.0 · unreleased
+## 0.10.0 · 2026-11-24
 
 **New: a context strip above the prompt**
 
@@ -13,8 +13,30 @@
 - The limit is a pin through the bar, standing out above and below it, with 0 and the window on either side. Parts past the limit keep their colours; the room past it is fainter, window better not reached.
 - The summary leads with the room left before the limit (`186.0k left before the 250.0k quality limit`), then this session's figures, then the plan's on a line of its own.
 - The meter holds still while a turn runs, unless the context moves 2% of the window or 20 seconds pass, so the desktop does not reload its frame on every step.
+
+**Desktop app: the pane's layout**
+
+- The verdict leads with its share of the limit it is read from (`66% of 250k`), not of the window, so the figure and the advice under it agree. The meter still spans the whole window.
+- The next step says what its button does (`Writes a note a fresh session starts from`).
+- Only the summary is framed; the other groups are flat sections under a hairline.
+- In context splits the conversation from the setup loaded at start, with the setup's parts under its sum.
+- Biggest outputs shows the tool, then what it ran on; only the row Guard acts on and guarded rows carry a mark, so no colour there reads as a part of the meter. The guard's advice shows without the pointer, as does a flagged row's fix.
+- One **Show all** (`e`) at the foot opens every group; collapsed groups say what they leave out (`+3 more · 11.2k`). The MCP and skill lists say when they hold only the largest few (`11.3k of 18.1k`).
+- The plan's limits sit at the foot as short bars, apart from this session's figures. **Count exactly** is now **Exact count**.
+- A narrow pane keeps every name and figure readable: a row's dim detail and a section's note give way before the name, the room line wraps rather than cutting off, and plan bars wrap with even gaps.
+- Every row of a group keeps its mark's column, so names line up whether a row is marked or not. Setup's square is striped with its parts' colours, and its parts hang from a line drawn down from it, as do the rows of Memory files, Largest MCP tools and Largest skills.
+- The actions at the foot sit side by side with a small even gap, wrapping on a narrow pane. The guard's target carries its mark alone, without a long note under it.
+- The plan's 5h and 7d limits are the pane's footer, at its bottom edge once the first response reports them. Each bar is blue, orange from 50% and red from 80%, on a faint track of its own colour.
 - The bar is drawn in the page's own boxes, which redraw in place: it no longer blinks with every response. The lens shows only under the pointer.
 - Every part on the meter can be read under the lens, even a sliver thinner than a column.
+
+**Terminal: the pane in the desktop pane's terms**
+
+- Setup's parts hang from a tree line (`├─`, `└─`), each with its own colour, and every In context row shows its share beside its size.
+- "Top context eaters" is "Biggest outputs": the tool, then what it ran on, dim. A guarded row is a green ✓ with "guarded"; the long "x guards ▸" note is gone, the ▸ alone marks the target.
+- The next step reads as the desktop's ("Compact before answers slip", "Hand off before it gets tight"), with what the press does dim after it.
+- The plan's 5h and 7d limits are bars at the foot, blue, orange from 50% and red from 80%, rather than figures on the cache line.
+- The expanded lists hang from a tree line too, and "Loaded MCP tools" is "Largest MCP tools".
 
 **Windows**
 

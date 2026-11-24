@@ -43,7 +43,7 @@ Both run in CI on Linux and macOS.
 
 Issues labelled [`good first issue`](https://github.com/bcanozgur/cc-side-context/labels/good%20first%20issue) are small and self-contained. Ideas that would help:
 
-- better labels for MCP tool results in **Top context eaters**;
+- better labels for MCP tool results in **Biggest outputs**;
 - guard advice for more commands (what to pipe through `head`, `jq` or `--quiet`);
 - estimates checked against exact counts on real sessions in other languages.
 

@@ -7,6 +7,7 @@ import {
   type PaneData,
   type Ui,
   budgetOf,
+  colorOf,
   isHeavy,
   labelOf,
   nextGuard,
@@ -15,6 +16,7 @@ import {
   shownEaters,
   statusOf,
   top,
+  usageColor,
 } from './pane'
 
 // The pane as the desktop app, the editor and the phone draw it: HTML in a
@@ -24,28 +26,15 @@ import {
 // sentence and one primary button, and the rest of the actions sit quietly
 // at the foot.
 
-// What a card shows before "Show all"
-const ROWS = 6
+// What a group shows before "Show all"
+const SETUP_ROWS = 3
 const EATERS = 3
+// A row's name up to this long is kept whole while its detail gives way
+const SHORT_NAME = 12
 
-// Each part of the context has a colour of its own, shared by its dot and its
-// stretch of the meter, in the host's own hues where it has one (tools blue,
-// MCP orange, messages green, the system prompt amber). The meter's colours
-// are fixed, not the theme's: mid tones that read on a light and a dark pane
-// alike.
-const PART: Record<string, string> = {
-  Conversation: '#3fa877',
-  'Built-in tools': '#4f86e8',
-  'MCP tools': '#e2703f',
-  'System prompt': '#d9a521',
-  Skills: '#9a72d8',
-  'MCP instructions': '#d4679e',
-  'Memory (CLAUDE.md, rules)': '#2ea5bd',
-  Subagents: '#b5835a',
-  'Slash commands': '#7b8fa6',
-}
-const OTHER = '#8c939c'
-const colorOf = (name: string): string => PART[labelOf(name)] ?? OTHER
+// The line between the pane's sections: the track's grey, a touch stronger
+const HAIRLINE = '#80808040'
+const GUIDE = '#80808066'
 
 // A part's colour lifted toward white, still opaque: a translucent fill would
 // mix with the track into a murky shade the list's dot does not have
@@ -386,6 +375,7 @@ export const meterBox = (
   )
 }
 
+
 export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
   const { Box, Text, Button } = ui
   // A flex child that may shrink below its text, so the text truncates
@@ -407,6 +397,7 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
   const limitLabel = isQualityFirst ? 'quality limit' : snap.compactAt !== undefined ? 'auto-compact' : 'window'
   const status = statusOf(snap, d.quality, d.compacting)
   const pressure = status.pressure
+  const isMarked = budget < Math.max(snap.window, snap.tokens, 1)
 
   const inUse = snap.rows.filter(r => r.kind === 'used')
   const conversation = inUse.find(r => /^messages/i.test(r.name))
@@ -422,144 +413,233 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
   const guardTarget = nextGuard(eaten, d.guards)
   const canGuard = guardTarget !== undefined
 
-  // The card every group sits in: a neutral frame, the title a row of its own
-  // with a figure flush right. Colour is kept for the data.
-  const card = (key: string, title: string | undefined, aside: string | undefined, children: unknown, first = false) => (
-    <Box key={key} flexDirection="column" width="100%" borderStyle="round" borderColor="subtle" paddingX={1} flexShrink={0} marginTop={first ? 0 : 1}>
-      {title !== undefined && (
-        <Box width="100%" justifyContent="space-between" marginBottom={1}>
-          <Box flexShrink={1} {...clip}>
-            <Text bold wrap="truncate-end">
-              {title}
+  // The summary is the one framed card: the verdict, the meter and the next
+  // step. Every other group is a flat section under a hairline, so the frame
+  // marks what matters most rather than every group alike.
+  const hairline = <Box width="100%" height={0.05} backgroundColor={HAIRLINE} />
+  const section = (key: string, title: string, aside: string | undefined, children: unknown) => (
+    <Box key={key} flexDirection="column" width="100%" paddingX={1} marginTop={1} flexShrink={0}>
+      {hairline}
+      <Box width="100%" justifyContent="space-between" marginTop={1}>
+        <Box flexShrink={1} {...clip}>
+          <Text bold wrap="truncate-end">
+            {title}
+          </Text>
+        </Box>
+        {aside !== undefined && (
+          <Box flexShrink={1000} paddingLeft={1} {...clip}>
+            <Text dimColor wrap="truncate-end">
+              {aside}
             </Text>
           </Box>
-          {aside !== undefined && (
-            <Box flexShrink={0} paddingLeft={1}>
-              <Text dimColor>{aside}</Text>
-            </Box>
-          )}
-        </Box>
-      )}
+        )}
+      </Box>
       {children as never}
     </Box>
   )
 
-  // One row: a dot in its part's colour, the name, the size and its share.
-  // A tip, when the row has one, shows under it while the pointer is on it.
-  const row = (p: { key: string; color: Color; label: string; value: string; share?: string; isWarn?: boolean; isDim?: boolean; tip?: string }) => (
-    <Box key={p.key} flexDirection="column" width="100%">
-      <Box width="100%" justifyContent="space-between">
-        <Box flexShrink={1} {...clip}>
-          <Text color={p.color}>{'■ '}</Text>
-          <Text dimColor={p.isDim} wrap="truncate-end">
-            {p.label}
-          </Text>
-        </Box>
-        <Box flexShrink={0} paddingLeft={1}>
-          <Text color={p.isWarn ? 'error' : undefined} dimColor={!p.isWarn}>
-            {p.value}
-          </Text>
-          <Box width={6} justifyContent="flex-end">
-            <Text bold={!p.isDim}>{p.share ?? ''}</Text>
-          </Box>
-        </Box>
+  // A part's colour as a small square of the page's own boxes, a cell wide
+  // and as tall: Setup's is striped with the colours of every part under it,
+  // since it is their sum
+  const swatch = (colors: string[], key: string) => (
+    <Box key={key} width={1} height={0.45} flexShrink={0} overflow="hidden">
+      {colors.map((c, i) => (
+        <Box key={`${key}-${i}`} width={0} flexGrow={1} height="100%" backgroundColor={c} />
+      ))}
+    </Box>
+  )
+  type Mark = { glyph: string; color: Color } | { colors: string[] }
+  // Every row of a group keeps the mark's column, marked or not, so the
+  // names line up under one another
+  const markSlot = (key: string, mark: Mark | undefined) => (
+    <Box key={`${key}-mark`} width={2} height={1} flexShrink={0} alignItems="center">
+      {mark !== undefined && ('colors' in mark ? swatch(mark.colors, `${key}-swatch`) : <Text color={mark.color}>{mark.glyph}</Text>)}
+    </Box>
+  )
+  // The line a part hangs from: down from Setup's square, a short arm into
+  // each part, ending at the last one
+  const guide = (key: string, isLast: boolean) => (
+    <Box key={`${key}-guide`} width={2} flexShrink={0}>
+      <Box width={0.45} flexShrink={0} />
+      <Box width={0.15} flexShrink={0} flexDirection="column">
+        <Box width="100%" height={isLast ? 0.5 : undefined} flexGrow={isLast ? 0 : 1} backgroundColor={GUIDE} />
       </Box>
-      {p.tip !== undefined && (
-        <Box display="none" hover={{ display: 'flex' }} width="100%" paddingLeft={2} {...clip}>
-          <Text dimColor wrap="wrap">
-            {p.tip}
-          </Text>
-        </Box>
-      )}
+      <Box width={0} flexGrow={1} height={0.5} marginRight={0.4} flexDirection="column" justifyContent="flex-end">
+        <Box width="100%" height={0.05} backgroundColor={GUIDE} />
+      </Box>
     </Box>
   )
 
-  // "Show all", inside the card it opens, as the host's own sections do
-  const more = (key: string, hidden: number, hotkey?: string) =>
-    hidden > 0 || d.expanded ? (
-      <Box marginTop={1}>
-        <Button key={key} hotkey={hotkey} label={d.expanded ? 'Show less' : `Show ${hidden} more`} dimColor onPress={actions.toggleExpanded} />
+  // One row: the mark's column (a part's colour, the guard's target), the
+  // name and a dim detail after it, the size and its share. A tip shows under
+  // it: always when it asks for action, else under the pointer.
+  type RowOf = {
+    key: string
+    label: string
+    detail?: string
+    value: string
+    share?: string
+    mark?: Mark
+    hasSlot?: boolean
+    tree?: 'mid' | 'last'
+    isWarn?: boolean
+    isQuiet?: boolean
+    tip?: string
+    isTipShown?: boolean
+  }
+  const row = (p: RowOf) => (
+    <Box key={p.key} width="100%">
+      {p.tree !== undefined && guide(p.key, p.tree === 'last')}
+      <Box flexDirection="column" width={0} flexGrow={1} {...clip}>
+        <Box width="100%" justifyContent="space-between">
+          {/* On a narrow pane the detail gives way first, so the name stays readable */}
+          <Box flexShrink={1} {...clip}>
+            {(p.hasSlot || p.mark !== undefined) && markSlot(p.key, p.mark)}
+            {/* A short name never shrinks: the page shares a shortfall by size,
+                and even a fraction of a pixel taken from "Read" draws "Re…" */}
+            <Box flexShrink={p.detail !== undefined && p.label.length <= SHORT_NAME ? 0 : 1} {...clip}>
+              <Text color={p.isWarn ? 'error' : undefined} wrap="truncate-end">
+                {p.label}
+              </Text>
+            </Box>
+            {p.detail !== undefined && (
+              <Box flexShrink={1000} {...clip}>
+                <Text dimColor wrap="truncate-end">{`\u00a0${p.detail}`}</Text>
+              </Box>
+            )}
+          </Box>
+          <Box flexShrink={0} paddingLeft={1}>
+            <Text color={p.isWarn ? 'error' : undefined} dimColor={!p.isWarn}>
+              {p.value}
+            </Text>
+            {p.share !== undefined && (
+              <Box width={5} justifyContent="flex-end">
+                <Text bold={!p.isQuiet} dimColor={p.isQuiet}>
+                  {p.share}
+                </Text>
+              </Box>
+            )}
+          </Box>
+        </Box>
+        {p.tip !== undefined && (
+          <Box
+            display={p.isTipShown ? 'flex' : 'none'}
+            hover={p.isTipShown ? undefined : { display: 'flex' }}
+            width="100%"
+            paddingLeft={p.hasSlot || p.mark !== undefined ? 2 : 0}
+            {...clip}
+          >
+            <Text dimColor={!p.isWarn} color={p.isWarn ? 'error' : undefined} wrap="wrap">
+              {p.tip}
+            </Text>
+          </Box>
+        )}
       </Box>
-    ) : undefined
+    </Box>
+  )
+
+  // What a collapsed group leaves out; "Show all" at the foot opens it
+  const hiddenLine = (key: string, n: number, tokens: number, isTree = false, hasSlot = false) =>
+    n > 0 && (
+      <Box key={key} width="100%">
+        {isTree && guide(key, true)}
+        {hasSlot && markSlot(key, undefined)}
+        <Box width={0} flexGrow={1} {...clip}>
+          <Text dimColor wrap="truncate-end">{`+${n} more · ${fmt(tokens)}`}</Text>
+        </Box>
+      </Box>
+    )
 
   // The meter, its lens under the pointer and its scale under it (meterBox).
   // Drawn wider than the card, so the page fits it to the card's width
-  const meter = () => {
-    const isMarked = budget < Math.max(snap.window, snap.tokens, 1)
-    return (
-      <Box width="100%">
-        {meterBox(ui, {
-          slot: 'pane',
-          snap,
-          delta: d.live.delta,
-          budget,
-          W: Math.max(160, d.columns * 9),
-          BH: 20,
-          H: 40,
-          isFull: true,
-          alt: `${windowShare}% of the ${fmt(snap.window)} window in use${isMarked ? `, ${limitLabel} marked at ${fmt(budget)}` : ''}`,
-          turn: { isRunning: d.isRunning === true, now: d.now },
-        })}
-      </Box>
-    )
-  }
+  const windowShare = Math.round((snap.tokens / Math.max(1, snap.window)) * 100)
+  const meter = () => (
+    <Box width="100%">
+      {meterBox(ui, {
+        slot: 'pane',
+        snap,
+        delta: d.live.delta,
+        budget,
+        W: Math.max(160, d.columns * 9),
+        BH: 20,
+        H: 40,
+        isFull: true,
+        alt: `${windowShare}% of the ${fmt(snap.window)} window in use${isMarked ? `, ${limitLabel} marked at ${fmt(budget)}` : ''}`,
+        turn: { isRunning: d.isRunning === true, now: d.now },
+      })}
+    </Box>
+  )
 
-  // What to do now: a few words and one primary button, or nothing
-  const next: { text: string; color?: Color; press?: 'compact' | 'guard' | 'handoff' | 'resume' } | undefined = d.compacting
+  // What to do now: a few words, a line on what the press does, and one
+  // primary button; or nothing
+  type Next = { text: string; detail?: string; color?: Color; press?: 'compact' | 'guard' | 'handoff' | 'resume' }
+  const next: Next | undefined = d.compacting
     ? { text: 'Keeping your goal, rules and decisions…', color: 'claude' }
     : canResume && picker.state === 'closed'
       ? { text: 'Pick up a past session?', press: 'resume' }
       : pressure >= 0.8
-        ? { text: 'Compact keeps your goal and decisions', color: 'error', press: 'compact' }
+        ? { text: 'Compact before answers slip', detail: 'Keeps your goal, rules and decisions', color: 'error', press: 'compact' }
         : pressure >= 0.5 && canGuard
-            ? { text: 'One output takes a lot of room', color: 'warning', press: 'guard' }
-            : pressure >= 0.5
-              ? { text: 'Hand off before it gets tight', color: 'warning', press: 'handoff' }
-              : undefined
+          ? {
+              text: 'One output takes a lot of room',
+              detail: `Guard asks Claude to ${guardTarget?.tool === 'Read' ? 'read only a range' : 'trim it'} next time`,
+              color: 'warning',
+              press: 'guard',
+            }
+          : pressure >= 0.5
+            ? { text: 'Hand off before it gets tight', detail: 'Writes a note a fresh session starts from', color: 'warning', press: 'handoff' }
+            : undefined
+
+  // Collapsed, each group shows its largest few; "Show all" at the foot opens
+  // every group at once, and the finer lists with them
+  const setupShown = d.expanded ? setup : setup.filter((r, i) => i < SETUP_ROWS || isLarge(r))
+  const setupHidden = setup.filter(r => !setupShown.includes(r))
+  const isTarget = (t: (typeof eaten)[number]) => {
+    const g = guardOf(t)
+    return g !== undefined && guardTarget !== undefined && g.tool === guardTarget.tool && g.key === guardTarget.key
+  }
+  const eatenShown = d.expanded ? eaten : eaten.filter((t, i) => i < EATERS || isTarget(t))
+  const eatenHidden = eaten.filter(t => !eatenShown.includes(t))
+  const lists = [
+    { key: 'memory', title: 'Memory files', part: 'Memory (CLAUDE.md, rules)', items: snap.memory },
+    { key: 'mcp', title: 'Largest MCP tools', part: 'MCP tools', items: snap.mcp },
+    { key: 'skills', title: 'Largest skills', part: 'Skills', items: snap.skills },
+  ].filter(l => l.items.length > 0)
+  const canExpand = d.expanded || setupHidden.length > 0 || eatenHidden.length > 0 || lists.length > 0
+
   const ACTION = {
     compact: { label: d.compacting ? 'Compacting…' : 'Compact', hotkey: 'c', onPress: actions.compact },
     handoff: { label: 'Handoff', hotkey: 'w', onPress: actions.handoff },
     guard: { label: 'Guard', hotkey: 'x', onPress: actions.guard },
-    exact: { label: 'Count exactly', hotkey: 'r', onPress: actions.exact },
+    exact: { label: 'Exact count', hotkey: 'r', onPress: actions.exact },
     resume: { label: picker.state === 'closed' ? 'Resume' : 'Close', hotkey: 'p', onPress: actions.resume },
+    more: { label: d.expanded ? 'Show less' : 'Show all', hotkey: 'e', onPress: actions.toggleExpanded },
   } as const
   const action = (key: keyof typeof ACTION, isPrimary = false) => (
-    <Box key={`a-${key}`} marginRight={1} marginTop={1}>
+    <Box key={`a-${key}`} flexShrink={0}>
       <Button key={key} hotkey={ACTION[key].hotkey} label={ACTION[key].label} variant={isPrimary ? 'primary' : 'secondary'} onPress={ACTION[key].onPress} />
     </Box>
   )
 
   const room = budget - snap.tokens
-  const windowShare = Math.round((snap.tokens / Math.max(1, snap.window)) * 100)
   const replied = d.live.lastReply
   const left = replied === null ? 0 : replied + d.ttl - d.now
   const isCold = replied !== null && left <= 0
-  // Under the meter, by what decides the next step: the room left before the
-  // limit, then this session's figures, then the plan's
+  // Under the meter, this session's figures; the plan's, which are the
+  // account's and not this conversation's, sit at the foot
   const session = [
     `${fmt(snap.tokens)} used`,
     ...(d.live.delta > 0 ? [`+${fmt(d.live.delta)} this turn`] : []),
     ...(replied === null ? [] : [isCold ? 'cache cold' : `cache ${Math.max(1, Math.ceil(left / 60_000))}m`]),
     ...(snap.cost !== undefined && snap.cost >= 0.01 ? [`$${snap.cost.toFixed(2)}`] : []),
   ]
-  const plan = snap.limits.map(l => `${limitName(l.kind)} ${Math.round(l.percent)}%`)
-  const line = (key: string, label: string | undefined, facts: string[]) =>
-    facts.length > 0 && (
-      <Box key={key} width="100%" {...clip}>
-        <Text dimColor wrap="truncate-end">
-          {label !== undefined && <Text>{`${label}  `}</Text>}
-          {facts.map((f, i) => (
-            <Text color={f === 'cache cold' ? 'warning' : undefined}>{`${i > 0 ? ' · ' : ''}${f}`}</Text>
-          ))}
-        </Text>
-      </Box>
-    )
 
-  const summary = card(
-    'summary',
-    undefined,
-    undefined,
-    <Box flexDirection="column" width="100%">
+  // The verdict leads with the share of the limit it is read from, so the
+  // figure and the advice under it tell the same story; the window's own
+  // share is the meter's to show
+  const limitShare = Math.round(pressure * 100)
+  const summary = (
+    <Box key="summary" flexDirection="column" width="100%" borderStyle="round" borderColor="subtle" paddingX={1} flexShrink={0}>
       <Box width="100%" justifyContent="space-between">
         <Box flexShrink={1} {...clip}>
           <Text color={status.color}>{'● '}</Text>
@@ -568,67 +648,103 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
           </Text>
         </Box>
         <Box flexShrink={0} paddingLeft={1}>
-          <Text bold>{`${windowShare}%`}</Text>
+          <Text bold>{`${limitShare}%`}</Text>
+          <Text dimColor>{isMarked ? ` of ${tickOf(budget)}` : ' of window'}</Text>
         </Box>
       </Box>
       {meter()}
       <Box width="100%" {...clip}>
-        <Text wrap="truncate-end">
+        <Text wrap="wrap">
           {room >= 0 ? <Text bold>{`${fmt(room)} left`}</Text> : <Text bold color="error">{`${fmt(-room)} over`}</Text>}
           <Text dimColor>{` ${room >= 0 ? 'before' : 'past'} the ${fmt(budget)} ${limitLabel}`}</Text>
         </Text>
       </Box>
-      {line('session', undefined, session)}
-      {line('plan', 'Plan', plan)}
+      <Box width="100%" {...clip}>
+        <Text dimColor wrap="truncate-end">
+          {session.map((f, i) => (
+            <Text color={f === 'cache cold' ? 'warning' : undefined}>{`${i > 0 ? ' · ' : ''}${f}`}</Text>
+          ))}
+        </Text>
+      </Box>
       {next && (
-        <Box width="100%" justifyContent="space-between" alignItems="center" flexWrap="wrap" marginTop={1}>
-          <Box flexShrink={1} marginTop={1} marginRight={1} {...clip}>
+        <Box width="100%" justifyContent="space-between" alignItems="center" flexWrap="wrap" marginTop={1} rowGap={0.5} columnGap={1}>
+          <Box flexDirection="column" flexShrink={1} {...clip}>
             <Text color={next.color} wrap="wrap">
               {next.text}
             </Text>
+            {next.detail !== undefined && (
+              <Text dimColor wrap="wrap">
+                {next.detail}
+              </Text>
+            )}
           </Box>
           {next.press && action(next.press, true)}
         </Box>
       )}
-    </Box>,
-    true,
+    </Box>
   )
 
-  // What is in the window: the conversation, then what was loaded at start,
-  // biggest first, each with its share of what is in context
-  const rows = [
-    ...(conversation ? [{ r: conversation, color: colorOf(conversation.name) }] : []),
-    ...setup.map(r => ({ r, color: colorOf(r.name) })),
-  ]
-  const rowsShown = d.expanded ? rows : rows.filter((x, i) => i < ROWS || isLarge(x.r))
-  const breakdown = card(
+  // What is in the window, split by what acts on it: the conversation, which
+  // compact and handoff shrink, then the setup loaded at start, which only
+  // settings trim, with its parts under it
+  const breakdown = section(
     'breakdown',
     'In context',
     `${isExact ? '' : '~'}${fmt(total)}`,
     <Box flexDirection="column" width="100%">
-      {rowsShown.map(({ r, color }) =>
+      {conversation &&
+        row({
+          key: 'row-Conversation',
+          mark: { colors: [colorOf(conversation.name)] },
+          label: labelOf(conversation.name),
+          value: fmt(conversation.tokens),
+          share: shareOf(conversation.tokens, total),
+          isWarn: isLarge(conversation),
+          tip: isLarge(conversation) ? ruleOf(conversation.name)?.fix : undefined,
+          isTipShown: true,
+        })}
+      {setup.length > 0 &&
+        row({
+          key: 'row-setup',
+          mark: { colors: [...new Set(setup.map(r => colorOf(r.name)))] },
+          label: 'Setup',
+          detail: 'loaded at start',
+          value: fmt(setupTokens),
+          share: shareOf(setupTokens, total),
+        })}
+      {setupShown.map((r, i) =>
         row({
           key: `row-${labelOf(r.name)}`,
-          color,
+          tree: i === setupShown.length - 1 && setupHidden.length === 0 ? 'last' : 'mid',
+          mark: { colors: [colorOf(r.name)] },
           label: labelOf(r.name),
           value: fmt(r.tokens),
           share: shareOf(r.tokens, total),
+          isQuiet: true,
           isWarn: isLarge(r),
           tip: isLarge(r) ? (ruleOf(r.name)?.fix ?? 'Bigger than usual') : undefined,
+          isTipShown: true,
         }),
       )}
-      {more('details', rows.length - rowsShown.length, 'e')}
+      {hiddenLine(
+        'row-setup-more',
+        setupHidden.length,
+        setupHidden.reduce((sum, r) => sum + r.tokens, 0),
+        true,
+        true,
+      )}
     </Box>,
   )
 
-  // The tool outputs filling the conversation, the one Guard acts on marked
-  const isTarget = (t: (typeof eaten)[number]) => {
-    const g = guardOf(t)
-    return g !== undefined && guardTarget !== undefined && g.tool === guardTarget.tool && g.key === guardTarget.key
-  }
-  const eatenShown = d.expanded ? eaten : eaten.filter((t, i) => i < EATERS || isTarget(t))
+  // The tool outputs filling the conversation: the tool, then what it ran on,
+  // dim. Only the row Guard acts on, and one already guarded, carry a mark,
+  // so no colour here reads as a part of the meter.
   const all = scaled(d.live)
-  const eaters = card(
+  const hasOutputMarks = eatenShown.some(t => {
+    const g = guardOf(t)
+    return isTarget(t) || (g !== undefined && isGuarded(d.guards, g))
+  })
+  const eaters = section(
     'eaters',
     'Biggest outputs',
     conversation && eaten.length > 0 ? 'of conversation' : undefined,
@@ -638,28 +754,36 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
         const g = guardOf(t)
         const isGuard = g !== undefined && isGuarded(d.guards, g)
         const target = isTarget(t)
+        const tool = eaterLabel({ tool: t.tool, target: '', count: 1 }).trim()
+        const label = eaterLabel(t)
         return row({
           key: `eater-${i}`,
-          color: target ? 'claude' : isGuard ? 'success' : 'subtle',
-          label: `${eaterLabel(t)}${isGuard ? ' · guarded' : ''}`,
+          mark: target ? { glyph: '▸', color: 'claude' } : isGuard ? { glyph: '✓', color: 'success' } : undefined,
+          hasSlot: hasOutputMarks,
+          label: tool,
+          detail: `${label.slice(tool.length).trimStart()}${isGuard ? ' · guarded' : ''}`,
           value: `~${fmt(t.tokens)}`,
           share: conversation ? shareOf(t.tokens, conversation.tokens) : undefined,
-          isDim: !target,
-          tip: target
-            ? `Guard sends it back once: Claude is asked to ${guardTarget?.tool === 'Read' ? 'read only a range' : 'trim it'} next time`
-            : isGuard
-              ? undefined
-              : tipOf(t.tool),
+          isQuiet: true,
+          // The mark says which one Guard acts on; what Guard does is the
+          // button's to say, so the row carries no long note
+          tip: target || isGuard ? undefined : tipOf(t.tool),
         })
       })}
-      {more('details-eaters', eaten.length - eatenShown.length, rows.length - rowsShown.length > 0 || d.expanded ? undefined : 'e')}
+      {hiddenLine(
+        'eater-more',
+        eatenHidden.length,
+        eatenHidden.reduce((sum, t) => sum + t.tokens, 0),
+        false,
+        hasOutputMarks,
+      )}
     </Box>,
   )
 
   const resume =
     picker.state === 'closed'
       ? undefined
-      : card(
+      : section(
           'resume',
           'Resume a session',
           undefined,
@@ -668,7 +792,7 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
             {picker.state === 'open' && picker.sessions.length === 0 && <Text dimColor>No past sessions in this project</Text>}
             {picker.state === 'open' &&
               picker.sessions.map((r, i) => (
-                <Box key={`resume-row-${i + 1}`} width="100%" justifyContent="space-between" marginTop={i > 0 ? 1 : 0}>
+                <Box key={`resume-row-${i + 1}`} width="100%" justifyContent="space-between" marginTop={1}>
                   <Box flexShrink={1} {...clip}>
                     <Button key={`resume-${i + 1}`} hotkey={String(i + 1)} label={fitWidth(r.title, 48)} onPress={() => actions.pick(r.id)} />
                   </Box>
@@ -680,37 +804,81 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
           </Box>,
         )
 
-  // The finer lists, under "Show all"
-  const list = (key: string, title: string, items: Item[]) =>
-    items.length === 0
-      ? undefined
-      : card(
-          key,
-          title,
-          fmt(items.reduce((sum, i) => sum + i.tokens, 0)),
-          <Box flexDirection="column" width="100%">
-            {top(items).map((i, n) => row({ key: `${key}-${n}`, color: 'subtle', label: i.name, value: fmt(i.tokens), isDim: true }))}
-          </Box>,
-        )
+  // The finer lists, under "Show all". Each holds the largest few, so beside
+  // its sum stands the whole its In context row counts, when that is more
+  const list = (l: (typeof lists)[number]) => {
+    const sum = l.items.reduce((s, i) => s + i.tokens, 0)
+    const whole = inUse.find(r => labelOf(r.name) === l.part)?.tokens
+    const aside = whole !== undefined && sum < whole * 0.95 ? `${fmt(sum)} of ${fmt(whole)}` : fmt(sum)
+    return section(
+      l.key,
+      l.title,
+      aside,
+      <Box flexDirection="column" width="100%">
+        {top(l.items).map((i, n, all) =>
+          row({ key: `${l.key}-${n}`, tree: n === all.length - 1 ? 'last' : 'mid', label: i.name, value: fmt(i.tokens), isQuiet: true }),
+        )}
+      </Box>,
+    )
+  }
 
-  // The actions the next step did not take, quiet, at the foot; the exact count
-  // only while the sizes are estimates
-  const rest = (['compact', 'handoff', ...(canGuard ? ['guard'] : []), ...(isExact ? [] : ['exact']), ...(canResume ? ['resume'] : [])] as (keyof typeof ACTION)[]).filter(
-    k => k !== next?.press,
+  // The plan's limits, the account's rather than this conversation's: a
+  // short bar each, red once nearly spent
+  const plan = snap.limits.length > 0 && (
+    <Box width="100%" alignItems="center" flexWrap="wrap" marginTop={1} rowGap={0.5} columnGap={1}>
+      <Box flexShrink={0}>
+        <Text dimColor>Plan</Text>
+      </Box>
+      {snap.limits.map(l => {
+        const p = Math.max(0, Math.min(100, Math.round(l.percent)))
+        const fill = usageColor(p)
+        return (
+          <Box key={`plan-${l.kind}`} width={11} flexGrow={1} alignItems="center">
+            <Box flexShrink={0}>
+              <Text dimColor>{`${limitName(l.kind)} `}</Text>
+            </Box>
+            <Box width={0} flexGrow={1} minWidth={2} height={0.25} backgroundColor={`${fill}29`} overflow="hidden">
+              <Box width={0} flexGrow={p} height="100%" backgroundColor={fill} />
+              <Box width={0} flexGrow={100 - p} />
+            </Box>
+            <Box flexShrink={0}>
+              <Text color={p >= 50 ? fill : undefined} dimColor={p < 50}>{` ${p}%`}</Text>
+            </Box>
+          </Box>
+        )
+      })}
+    </Box>
   )
 
+  // The actions the next step did not take, quiet, at the foot; the exact count
+  // only while the sizes are estimates, and one "Show all" for every group
+  const rest = (
+    ['compact', 'handoff', ...(canGuard ? ['guard'] : []), ...(isExact ? [] : ['exact']), ...(canResume ? ['resume'] : []), ...(canExpand ? ['more'] : [])] as (keyof typeof ACTION)[]
+  ).filter(k => k !== next?.press)
+
+  // The plan's limits are the pane's footer: the tree is held at least as
+  // tall as the room the surface gave the body, so they sit at its bottom
+  // edge however short the rest; a longer pane scrolls them to its end
   return (
-    <Box flexDirection="column" width="100%">
+    <Box flexDirection="column" width="100%" minHeight={d.bodyRows ?? '100%'}>
       {summary}
       {resume}
       {inUse.length > 0 && breakdown}
       {all.length > 0 && eaters}
-      {d.expanded && list('memory', 'Memory files', snap.memory)}
-      {d.expanded && list('mcp', 'MCP tools', snap.mcp)}
-      {d.expanded && list('skills', 'Skills', snap.skills)}
-      <Box width="100%" flexWrap="wrap" marginTop={1} paddingX={1}>
-        {rest.map(k => action(k))}
+      {d.expanded && lists.map(list)}
+      <Box flexDirection="column" width="100%" paddingX={1} marginTop={1} flexShrink={0}>
+        {hairline}
+        <Box width="100%" flexWrap="wrap" marginTop={1} rowGap={0.5} columnGap={1}>
+          {rest.map(k => action(k))}
+        </Box>
       </Box>
+      {plan && <Box key="spacer" flexGrow={1} />}
+      {plan && (
+        <Box key="footer" flexDirection="column" width="100%" paddingX={1} marginTop={1} flexShrink={0}>
+          {hairline}
+          {plan}
+        </Box>
+      )}
     </Box>
   )
 }

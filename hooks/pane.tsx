@@ -1,7 +1,7 @@
 import type { Color, EngineInterface, RenderChildren } from 'claude-code'
 
 import type { Guard, Item, Live, Picker, Row, Snapshot } from '../types'
-import { GUARD_FLOOR, agoOf, eaterLabel, fitWidth, fmt, guardOf, isGuarded, limitName, tipOf, widthOf } from './analysis'
+import { GUARD_FLOOR, agoOf, eaterLabel, fitWidth, fmt, guardOf, isGuarded, limitName, widthOf } from './analysis'
 
 // Drawing the pane: everything here is read from the figures handed in, and
 // every press goes back through `actions`
@@ -34,6 +34,30 @@ export const TURN_COLOR: Color = 'text'
 
 export const ruleOf = (name: string): Rule | undefined => RULES.find(r => r.test.test(name.replace(/\s*\(deferred\)\s*$/i, '')))
 export const labelOf = (name: string) => ruleOf(name)?.label ?? name.replace(/\s*\(deferred\)\s*$/i, '')
+
+// Each part of the context has a colour of its own, shared by its dot and its
+// stretch of the meter, in the host's own hues where it has one (tools blue,
+// MCP orange, messages green, the system prompt amber). The meter's colours
+// are fixed, not the theme's: mid tones that read on a light and a dark pane
+// alike.
+export const PART: Record<string, string> = {
+  Conversation: '#3fa877',
+  'Built-in tools': '#4f86e8',
+  'MCP tools': '#e2703f',
+  'System prompt': '#d9a521',
+  Skills: '#9a72d8',
+  'MCP instructions': '#d4679e',
+  'Memory (CLAUDE.md, rules)': '#2ea5bd',
+  Subagents: '#b5835a',
+  'Slash commands': '#7b8fa6',
+}
+export const OTHER = '#8c939c'
+export const colorOf = (name: string): string => PART[labelOf(name)] ?? OTHER
+
+// The plan's bars, coloured by how much is spent, as QuotaWarmer colours its
+// quota bars (claude.ai's own tokens): blue, orange from half, red from 80%.
+// The track is the fill's own colour, faint
+export const usageColor = (percent: number): string => (percent >= 80 ? '#b53333' : percent >= 50 ? '#c96e51' : '#2c84db')
 
 // Where the pane starts to worry: auto-compact, or sooner the quality budget,
 // past which long conversations tend to lose track of early details
@@ -150,6 +174,8 @@ export type PaneData = {
   surface?: string
   // The rows a docked pane has, so the actions can sit at its foot
   rows?: number
+  // The rows any surface gives the body, so the web pane keeps its footer at the bottom
+  bodyRows?: number
   quality: number
   // How long the prompt cache lives, in ms
   ttl: number
@@ -201,7 +227,21 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
   // only advice wraps, as cutting it loses the point.
   // Each row is label then number, the number flush with the pane's right
   // edge; a flag sits just before the number and colours it.
-  const line = (props: { label: string; value?: string; flag?: boolean; mark?: string; markColor?: string; dim?: boolean }) => {
+  // A row may hang from a tree line (`├─ `, `└─ `), and its label may carry a
+  // dim detail after the name; its share, when it has one, is a column of its
+  // own after the size
+  const line = (props: {
+    label: string
+    detail?: string
+    value?: string
+    share?: string
+    isShareBold?: boolean
+    flag?: boolean
+    mark?: string
+    markColor?: string
+    tree?: 'mid' | 'last'
+    dim?: boolean
+  }) => {
     const mark = props.mark ?? '  '
     const value = `${props.flag ? `${flagGlyph} ` : ''}${props.value ?? ''}`
     // The gap is laid out by flex, not padded with spaces, so the number stays
@@ -209,24 +249,33 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
     return (
       <Box width={width} justifyContent="space-between">
         <Box flexShrink={1}>
-          <Text color={props.markColor}>{mark}</Text>
-          <Text dimColor={props.dim} wrap="truncate-end">
-            {props.label}
+          <Text wrap="truncate-end">
+            {props.tree !== undefined && <Text color="subtle">{props.tree === 'last' ? '└─ ' : '├─ '}</Text>}
+            <Text color={props.markColor}>{mark}</Text>
+            <Text dimColor={props.dim}>{props.label}</Text>
+            {props.detail !== undefined && <Text dimColor>{` ${props.detail}`}</Text>}
           </Text>
         </Box>
         <Box flexShrink={0} paddingLeft={1}>
           <Text color={props.flag ? flagColor : undefined} dimColor={props.dim && !props.flag} bold={props.flag}>
             {value}
           </Text>
+          {props.share !== undefined && (
+            <Text bold={props.isShareBold} dimColor={!props.isShareBold}>
+              {props.share.padStart(5)}
+            </Text>
+          )}
         </Box>
       </Box>
     )
   }
   // Advice under a row: the arrow hangs, the text wraps beside it
-  const advice = (text: string) => (
-    <Box width={width} paddingLeft={2}>
+  // Under a row that hangs from a tree line, the line carries on beside it
+  const advice = (text: string, tree?: 'mid' | 'last') => (
+    <Box width={width} paddingLeft={tree === undefined ? 2 : 0}>
+      {tree !== undefined && <Text color="subtle">{tree === 'mid' ? '│  ' : '   '}</Text>}
       <Text dimColor>{'↳ '}</Text>
-      <Box width={Math.max(1, width - 4)}>
+      <Box width={Math.max(1, width - (tree === undefined ? 4 : 5))}>
         <Text dimColor wrap="wrap">
           {text}
         </Text>
@@ -291,7 +340,6 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
   const isCold = replied !== null && left <= 0
   const meter = [
     ...(replied === null ? [] : [isCold ? 'cache cold' : `cache ${Math.max(1, Math.ceil(left / 60_000))}m`]),
-    ...snap.limits.map(l => `${limitName(l.kind)} ${Math.round(l.percent)}%`),
     ...(snap.cost !== undefined && snap.cost >= 0.01 ? [`$${snap.cost.toFixed(2)}`] : []),
     ...(snap.compactAt === undefined ? ['auto-compact off'] : []),
   ]
@@ -336,7 +384,9 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
   const list = (title: string, items: Item[], limit: number) =>
     card(
       title,
-      items.length === 0 ? hint('none') : items.map(i => line({ label: i.name, value: fmt(i.tokens), flag: i.tokens > limit, dim: true })),
+      items.length === 0
+        ? hint('none')
+        : items.map((i, n) => line({ tree: n === items.length - 1 ? 'last' : 'mid', mark: '', label: i.name, value: fmt(i.tokens), flag: i.tokens > limit, dim: true })),
     )
 
   // /context's grid and the rows beside it, stacked: the pane is too narrow
@@ -516,55 +566,67 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
   // biggest first. Every size in thousands, 407 as 0.4k, so the column lines
   // up on the point
   const kilo = (n: number) => (n > 0 && n < 1000 ? `${Math.max(0.1, n / 1000).toFixed(1)}k` : fmt(n))
-  const row = (r: Row, isPart: boolean) => {
+  // Each row's share of what is in context, as the desktop pane writes it.
+  // Conversation and Setup keep the bar's colours, as its key; each part of
+  // the setup hangs from a line under it, in its colour on the desktop meter
+  const inContext = inUse.reduce((sum, r) => sum + r.tokens, 0)
+  const partShare = (tokens: number) => {
+    if (inContext <= 0 || tokens <= 0) return ''
+    const p = (tokens / inContext) * 100
+    return p < 1 ? '<1%' : `${Math.round(p)}%`
+  }
+  const row = (r: Row, tree?: 'mid' | 'last') => {
     const heavy = isHeavy(r, snap, d.quality)
     return (
       <Box flexDirection="column">
         {line({
-          mark: isPart ? '    ' : '■ ',
-          markColor: CONVERSATION_COLOR,
+          tree,
+          mark: '■ ',
+          markColor: tree === undefined ? CONVERSATION_COLOR : colorOf(r.name),
           label: labelOf(r.name),
           value: kilo(r.tokens),
+          share: partShare(r.tokens),
+          isShareBold: tree === undefined,
           flag: heavy,
-          dim: isPart,
+          dim: tree !== undefined,
         })}
-        {heavy && advice(ruleOf(r.name)?.fix ?? 'Bigger than usual')}
+        {heavy && advice(ruleOf(r.name)?.fix ?? 'Bigger than usual', tree)}
       </Box>
     )
   }
   const breakdown = card(
     'In context',
     <Box flexDirection="column">
-      {conversation && row(conversation, false)}
-      {setup.length > 0 && line({ mark: '■ ', markColor: SETUP_COLOR, label: 'Setup, loaded at start', value: kilo(setupTokens) })}
-      {setup.map(r => row(r, true))}
+      {conversation && row(conversation)}
+      {setup.length > 0 &&
+        line({ mark: '■ ', markColor: SETUP_COLOR, label: 'Setup', detail: 'loaded at start', value: kilo(setupTokens), share: partShare(setupTokens), isShareBold: true })}
+      {setup.map((r, i) => row(r, i === setup.length - 1 ? 'last' : 'mid'))}
     </Box>,
     undefined,
-    fmt(inUse.reduce((sum, r) => sum + r.tokens, 0)),
+    fmt(inContext),
   )
 
   // Each eater as a share of the conversation, the part it can be cut from
   const shareOf = (tokens: number) =>
     conversation && conversation.tokens > 0 ? `${String(Math.min(100, Math.round((tokens / conversation.tokens) * 100))).padStart(4)}%` : ''
   const eaters = card(
-    'Top context eaters',
+    'Biggest outputs',
     <Box flexDirection="column">
       {eaten.length === 0 && all[0] && hint(`Nothing large yet · the biggest is ~${fmt(all[0].tokens)}`)}
       {eaten.map(t => {
         const g = guardOf(t)
         const isTarget = g !== undefined && guardTarget !== undefined && g.tool === guardTarget.tool && g.key === guardTarget.key
+        const isGuard = g !== undefined && isGuarded(d.guards, g)
+        // The tool, then what it ran on, dim
+        const tool = eaterLabel({ tool: t.tool, target: '', count: 1 }).trim()
         return line({
-          mark: g !== undefined && isGuarded(d.guards, g) ? '⊘ ' : isTarget ? '▸ ' : '  ',
+          mark: isGuard ? '✓ ' : isTarget ? '▸ ' : '  ',
           markColor: isTarget ? 'claude' : 'success',
-          label: eaterLabel(t),
+          label: tool,
+          detail: `${eaterLabel(t).slice(tool.length).trimStart()}${isGuard ? ' · guarded' : ''}`,
           value: `~${fmt(t.tokens)}${shareOf(t.tokens)}`,
-          dim: !isTarget,
         })
       })}
-      {/* The tip is for Claude; what the person can do about it is the guard */}
-      {guardTarget
-        ? advice(`x guards ▸: next time Claude is asked to ${guardTarget.tool === 'Read' ? 'read a range' : 'trim its output'}`)
-        : eaten[0] && advice(tipOf(eaten[0].tool))}
     </Box>,
     undefined,
     conversation && eaten.length > 0 ? 'of conversation' : undefined,
@@ -572,19 +634,25 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
 
   // What to do now, one line read from the state; its button is drawn at
   // full strength and the rest dim, so the next step stands out
-  const next: { text: string; color?: Color; press?: string } = d.compacting
-    ? { text: 'Compacting…', color: 'claude' }
+  // In the desktop pane's words: a few words, then dim what the press does
+  const next: { text: string; detail?: string; color?: Color; press?: string } = d.compacting
+    ? { text: 'Keeping your goal, rules and decisions…', color: 'claude' }
     : canResume && picker.state === 'closed'
-      ? { text: 'New session · pick up a past one?', press: 'resume' }
-    : pressure >= 0.8
-      ? { text: `Time to compact${conversation ? ` · conversation ${fmt(conversation.tokens)}` : ''}`, color: 'error', press: 'compact' }
-      : flagged.length > 0 && !isExact
-        ? { text: '? rows may be large: count exactly', color: 'warning', press: 'exact' }
-        : pressure >= 0.5 && canGuard
-          ? { text: 'Filling · guard the biggest output', color: 'warning', press: 'guard' }
-          : pressure >= 0.5
-            ? { text: 'Filling · hand off before it gets tight', color: 'warning', press: 'handoff' }
-            : { text: 'Nothing to do now' }
+      ? { text: 'Pick up a past session?', press: 'resume' }
+      : pressure >= 0.8
+        ? { text: 'Compact before answers slip', detail: 'keeps your goal, rules and decisions', color: 'error', press: 'compact' }
+        : flagged.length > 0 && !isExact
+          ? { text: '? rows may be large: count exactly', color: 'warning', press: 'exact' }
+          : pressure >= 0.5 && canGuard
+            ? {
+                text: 'One output takes a lot of room',
+                detail: `x asks Claude to ${guardTarget?.tool === 'Read' ? 'read only a range' : 'trim it'} next time`,
+                color: 'warning',
+                press: 'guard',
+              }
+            : pressure >= 0.5
+              ? { text: 'Hand off before it gets tight', detail: 'writes a note a fresh session starts from', color: 'warning', press: 'handoff' }
+              : { text: 'Nothing to do now' }
 
   // Plain buttons, `c: compact`: the hotkey in the accent colour, no brackets.
   // Guard stays in its place when there is nothing to guard, drawn dim, so
@@ -594,6 +662,36 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
       <Button key={key} hotkey={hotkey} label={label} plain dimColor={isIdle || (next.press !== undefined && next.press !== key)} onPress={onPress} />
     </Box>
   )
+
+  // The plan's limits, the account's rather than this conversation's: a short
+  // bar each at the foot, coloured as the desktop pane colours them (blue,
+  // orange from half, red from 80%), the rest of its run a thin rule
+  const planBars = () => {
+    const shown = snap.limits.map(l => ({ name: limitName(l.kind), p: Math.max(0, Math.min(100, Math.round(l.percent))) }))
+    // "Plan " and, for each, its name, a space, the bar, " 100%" and a gap
+    const fixed = 5 + shown.reduce((sum, l) => sum + widthOf(l.name) + 1 + 5 + 2, 0)
+    const cells = Math.max(4, Math.floor((width - fixed) / Math.max(1, shown.length)))
+    return (
+      <Box width={width}>
+        <Text wrap="truncate-end">
+          <Text dimColor>Plan </Text>
+          {shown.map((l, i) => {
+            const filled = Math.round((l.p / 100) * cells)
+            const fill = usageColor(l.p)
+            return (
+              <Text>
+                <Text dimColor>{`${i > 0 ? '  ' : ''}${l.name} `}</Text>
+                <Text color={fill}>{'━'.repeat(filled)}</Text>
+                <Text color="subtle">{'─'.repeat(cells - filled)}</Text>
+                <Text color={l.p >= 50 ? fill : undefined} dimColor={l.p < 50}>{` ${l.p}%`.padStart(5)}</Text>
+              </Text>
+            )
+          })}
+        </Text>
+      </Box>
+    )
+  }
+  const plan = snap.limits.length > 0 && planBars()
 
   // The actions as a toolbar at the pane's foot, under a rule rather than in
   // a frame: the room above them then reads as the pane's own, not as a card
@@ -605,8 +703,9 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
       </Text>
       <Box flexDirection="column" paddingX={isFramed ? 2 : 0}>
         <Box width={width}>
-          <Text color={next.color} dimColor={next.color === undefined} wrap="truncate-end">
-            {`${next.press ? '▶ ' : ''}${next.text}`}
+          <Text wrap="truncate-end">
+            <Text color={next.color} dimColor={next.color === undefined}>{`${next.press ? '▶ ' : ''}${next.text}`}</Text>
+            {next.detail !== undefined && <Text dimColor>{` · ${next.detail}`}</Text>}
           </Text>
         </Box>
         <Box width={width} flexWrap="wrap">
@@ -619,6 +718,7 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
           {(d.expanded || flagged.length > 0) && button('exact', 'r', 'exact', actions.exact)}
           {canResume && button('resume', 'p', picker.state === 'closed' ? 'resume' : 'close', actions.resume)}
         </Box>
+        {plan}
         <Box width={width}>
           <Text dimColor wrap="truncate-end">
             {footer}
@@ -645,7 +745,7 @@ export const drawPane = ({ Box, Text, Button }: Ui, d: PaneData, actions: PaneAc
           deferred.map(r => line({ label: labelOf(r.name), value: fmt(r.tokens), dim: true })),
         )}
       {!isStorage && d.expanded && list('Memory files', snap.memory, ITEM_LIMIT.memory)}
-      {!isStorage && d.expanded && list('Loaded MCP tools', snap.mcp, ITEM_LIMIT.mcp)}
+      {!isStorage && d.expanded && list('Largest MCP tools', snap.mcp, ITEM_LIMIT.mcp)}
       {!isStorage && d.expanded && list('Largest skills', snap.skills, ITEM_LIMIT.skills)}
       <Box flexGrow={1} />
       {controls}

@@ -977,6 +977,8 @@ export const register: Register = (on, options) => {
       desktop: await isDesktop($),
       surface: e.surface,
       rows: e.props.placement === 'dock' ? e.props.scroll?.bodyRows : undefined,
+      // The page's room, whatever the placement: its footer stands on it
+      bodyRows: e.props.scroll?.bodyRows,
       quality,
       ttl: ttlOf(options, l.snapshot),
       isRunning,

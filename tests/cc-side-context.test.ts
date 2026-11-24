@@ -163,8 +163,8 @@ test('draws the breakdown on every surface', async ($, on) => {
     expect(drawn).toContain('Conversation')
     expect(drawn).toContain('Skills')
     expect(drawn).not.toContain('(deferred) (deferred)')
-    expect(drawn).not.toContain('Exact count')
     if (surface === 'terminal') {
+      expect(drawn).not.toContain('Exact count')
       // the bar is the whole window, with auto-compact a mark on it and the room before it
       expect(drawn).toContain(' / 200.0k window')
       expect(drawn).toContain(' 42%')
@@ -184,6 +184,9 @@ test('draws the breakdown on every surface', async ($, on) => {
       expect(drawn).toContain('"minWidth":0')
       // the verdict, a meter over the whole window with the limit marked on it
       expect(drawn).toContain('Filling up')
+      // led by its share of the limit the advice is read from, not of the window
+      expect(drawn).toContain('["50%"]')
+      expect(drawn).toContain('[" of 167k"]')
       expect(drawn).toContain('"type":"Svg"')
       expect(drawn).toContain('42% of the 200.0k window in use, auto-compact marked at 167.0k')
       expect(drawn).toContain('84.0k used')
@@ -201,7 +204,21 @@ test('draws the breakdown on every surface', async ($, on) => {
       expect(drawn).not.toContain('Disable unused plugins in /plugin')
       expect(drawn).not.toContain('Sizes are estimates')
       expect(drawn.match(/"variant":"primary"/g)?.length).toBe(1)
-      expect(drawn).toContain('"label":"Count exactly","hotkey":"r","variant":"secondary"')
+      expect(drawn).toContain('"label":"Exact count","hotkey":"r","variant":"secondary"')
+      // the conversation, then the setup under its sum with its parts beneath
+      expect(drawn.indexOf('Conversation')).toBeLessThan(drawn.indexOf('loaded at start'))
+      expect(drawn.indexOf('loaded at start')).toBeLessThan(drawn.lastIndexOf('System prompt'))
+      // on a narrow pane a row's dim detail gives way before its name
+      expect(drawn).toContain('"flexShrink":1000')
+      // one "Show all" at the foot for every group
+      expect(drawn.match(/"hotkey":"e"/g)?.length).toBe(1)
+      expect(drawn).toContain('"label":"Show all"')
+      // Setup's square is striped with its parts' colours, and the parts hang
+      // from a line
+      expect(drawn).toContain('"width":1,"height":0.45')
+      expect(drawn).toContain('"backgroundColor":"#80808066"')
+      // the guard's target carries a mark, not a long note
+      expect(drawn).not.toContain('Guard sends it back')
     }
     await pane.unmount()
   }
@@ -221,7 +238,7 @@ test('on the page the exact count flags a row, its fix under the pointer', async
   const drawn = JSON.stringify(await pane.drawn())
   expect(drawn).toContain('Disable unused plugins in /plugin')
   expect(drawn).toContain('"display":"none"')
-  expect(drawn).not.toContain('Count exactly')
+  expect(drawn).not.toContain('Exact count')
 })
 
 const mount = ($: Parameters<TestBody>[0]) =>
@@ -309,22 +326,27 @@ test('lists the tool results eating the most context, a repeated read as one row
   await $.command.run(run('on'))
 
   const drawn = JSON.stringify(await (await mount($)).drawn())
-  expect(drawn).toContain('Top context eaters')
-  expect(drawn).toContain('Read src/big.ts ×2')
+  expect(drawn).toContain('Biggest outputs')
+  // the tool, then what it ran on, dim
+  expect(drawn).toContain('["Read"]')
+  expect(drawn).toContain('[" src/big.ts ×2"]')
   expect(drawn).toContain('~20.0k')
-  expect(drawn).toContain('Bash npm test')
+  expect(drawn).toContain('[" npm test"]')
   // each row says how much of the conversation it is
   expect(drawn).toContain('of conversation')
   expect(drawn).toContain('~20.0k  28%')
   expect(drawn).toContain('~2.0k   3%')
-  // the row x would guard is marked, and the advice says what the press does
+  // the row x would guard is marked, with no long note under it
   expect(drawn).toContain('▸ ')
-  expect(drawn).toContain('x guards ▸: next time Claude is asked to read a range')
+  expect(drawn).not.toContain('x guards ▸')
   // a tiny edit result is not worth a row
   expect(drawn).not.toContain('Edit src/fetch.ts')
   // the conversation leads the breakdown; what was loaded at the start follows under its sum
-  expect(drawn.indexOf('Conversation')).toBeLessThan(drawn.indexOf('Setup, loaded at start'))
-  expect(drawn).toContain('Setup, loaded at start')
+  expect(drawn.indexOf('Conversation')).toBeLessThan(drawn.indexOf('loaded at start'))
+  expect(drawn).toContain('[" loaded at start"]')
+  // each part hangs from a line under Setup, the last one closing it
+  expect(drawn).toContain('├─ ')
+  expect(drawn).toContain('└─ ')
   expect(drawn.indexOf('Skills')).toBeLessThan(drawn.indexOf('System prompt'))
 })
 
@@ -547,7 +569,8 @@ test('on the page a 1M window fills the whole bar, the quality limit marked on i
     props: { title: 'Context', isFocused: false, bodyColumns: 40, placement: 'dock' } as never,
   })
   const drawn = JSON.stringify(await pane.drawn())
-  expect(drawn).toContain('["6%"]')
+  expect(drawn).toContain('["26%"]')
+  expect(drawn).toContain('[" of 250k"]')
   // under it the room left first, then what the session has used
   expect(drawn).toContain('["186.0k left"]')
   expect(drawn).toContain('[" before the 250.0k quality limit"]')
@@ -657,7 +680,11 @@ test('a 1M window warns at the quality budget, long before auto-compact', async 
   expect(drawn).toContain('quality limit 250.0k')
   expect(drawn).toContain('50.0k over')
   expect(drawn).toContain('░')
-  expect(drawn).toContain('5h 34%')
+  // the plan's limits are bars at the foot, blue while under half
+  expect(drawn).toContain('["Plan "]')
+  expect(drawn).toContain('"color":"#2c84db"')
+  expect(drawn).toContain('━')
+  expect(drawn).toContain('  34%')
   expect(drawn).toContain('$1.50')
   // a subscription's cache lasts an hour
   await $.turn.complete(turn)
@@ -809,9 +836,10 @@ test('x guards the biggest eater: the next whole read is sent back once', async 
   const pane = await mount($)
   await pane.press({ key: 'guard' })
   const guarded = JSON.stringify(await pane.drawn())
-  expect(guarded).toContain('⊘')
+  expect(guarded).toContain('✓ ')
+  expect(guarded).toContain(' · guarded')
   // the mark moves on to the next row x would guard
-  expect(guarded).toContain('x guards ▸: next time Claude is asked to trim its output')
+  expect(guarded).toContain('▸ ')
 
   const first = await $.tool.call({ tool: 'Read', file_path: '/repo/src/big.ts' } as never)
   expect(JSON.stringify(first)).toContain('offset/limit')
