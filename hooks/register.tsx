@@ -10,6 +10,7 @@ import {
   projectSlug,
   titleOf,
   eaterLabel,
+  estimate,
   fmt,
   guardHit,
   guardMessage,
@@ -423,13 +424,47 @@ const hide = async ($: EngineInterface) => {
 // open or close the plugin heard
 const toggle = async ($: EngineInterface) => ((await paneOf($))?.isShown ? hide($) : show($))
 
-// The prompt cache lasts five minutes on an API key and an hour on a
-// subscription; a subscription is the session that reports rate limits
+type Ttl = '5m' | '1h'
+const TTL_MS: Record<Ttl, number> = { '5m': 5 * 60_000, '1h': 60 * 60_000 }
+const ttlWord = (v: unknown): Ttl | undefined => (v === '5m' || v === '1h' ? v : undefined)
+const isOn = (v: unknown) => typeof v === 'string' && /^(1|true|yes|on)$/i.test(v.trim())
+
+// The lifetime Claude Code was told to give the main conversation's cache, in
+// its own order: FORCE_PROMPT_CACHING_5M, CLAUDE_CODE_PROMPT_CACHE_TTL, the
+// promptCacheTtl setting, then ENABLE_PROMPT_CACHING_1H. An env var set in a
+// settings file's `env` counts as one set in the shell
+let pinnedTtl: Ttl | undefined
+export const pinOf = (env: (key: string) => unknown, settings: Readonly<Record<string, unknown>>): Ttl | undefined => {
+  if (isOn(env('FORCE_PROMPT_CACHING_5M'))) return '5m'
+  const named = ttlWord(env('CLAUDE_CODE_PROMPT_CACHE_TTL')) ?? ttlWord(settings.promptCacheTtl)
+  if (named) return named
+  return isOn(env('ENABLE_PROMPT_CACHING_1H')) ? '1h' : undefined
+}
+const readPin = async ($: EngineInterface) => {
+  const settings = await $.settings.read().catch(() => ({}) as Readonly<Record<string, unknown>>)
+  const fromFiles = typeof settings.env === 'object' && settings.env !== null ? (settings.env as Record<string, unknown>) : {}
+  // Each name spelled out, so the variables the module reads can be listed
+  const [force, named, hour] = await Promise.all([
+    $.env.get('FORCE_PROMPT_CACHING_5M').catch(() => undefined),
+    $.env.get('CLAUDE_CODE_PROMPT_CACHE_TTL').catch(() => undefined),
+    $.env.get('ENABLE_PROMPT_CACHING_1H').catch(() => undefined),
+  ])
+  const shell: Record<string, string | undefined> = { FORCE_PROMPT_CACHING_5M: force, CLAUDE_CODE_PROMPT_CACHE_TTL: named, ENABLE_PROMPT_CACHING_1H: hour }
+  pinnedTtl = pinOf(k => shell[k] ?? fromFiles[k], settings)
+}
+
+// A plan window used up: past it the session draws on usage credits, and
+// Claude Code drops the main conversation to the five-minute cache
+const isOverPlan = (snap: Snapshot) => snap.limits.some(l => (l.kind === 'five_hour' || l.kind === 'seven_day') && l.percent >= 100)
+
+// The prompt cache lasts five minutes on an API key, usage credits or a cloud
+// provider, and an hour on a subscription within its limits; a subscription
+// is the session that reports rate limits. The plugin's own option wins, then
+// what Claude Code itself was set to
 const ttlOf = (options: PluginOptions, snap: Snapshot | null): number => {
-  const ttl = options.cacheTtl
-  if (ttl === '5m') return 5 * 60_000
-  if (ttl === '1h') return 60 * 60_000
-  return snap && snap.limits.length > 0 ? 60 * 60_000 : 5 * 60_000
+  const ttl = ttlWord(options.cacheTtl) ?? pinnedTtl
+  if (ttl) return TTL_MS[ttl]
+  return snap && snap.limits.length > 0 && !isOverPlan(snap) ? TTL_MS['1h'] : TTL_MS['5m']
 }
 
 // Guards last across sessions, one list a project
@@ -477,6 +512,22 @@ const guardPressed = async ($: EngineInterface, quality: number) => {
 // calls in between do not use up another's retry.
 const denied = new Map<string, number>()
 
+// Above this a file is sized by its bytes alone, not read through
+const READ_TO_SIZE = 4 * 1024 * 1024
+
+// A file's size in tokens as it reads now: its text estimated as an eater's
+// is, or its bytes at four a token when it is too large to read or unreadable
+const sizeOf = async ($: EngineInterface, path: string): Promise<number | undefined> => {
+  const bytes = await $.fs
+    .stat(path)
+    .then(s => s.size)
+    .catch(() => undefined)
+  if (bytes === undefined) return undefined
+  if (bytes > READ_TO_SIZE) return Math.ceil(bytes / 4)
+  const text = await $.fs.read(path).catch(() => undefined)
+  return typeof text === 'string' ? estimate(text) : Math.ceil(bytes / 4)
+}
+
 const guardCall = async ($: EngineInterface, call: { tool: string; input: Record<string, unknown> }) => {
   const now = await $.clock.now()
   const hit = guardHit(await read($, guards), call, now)
@@ -487,15 +538,13 @@ const guardCall = async ($: EngineInterface, call: { tool: string; input: Record
     denied.delete(id)
     return undefined
   }
-  // A file that has shrunk since is no longer worth sending back
+  // A file that has shrunk since is no longer worth sending back. It is sized
+  // as the eaters are, so Turkish or CJK text is not counted at a quarter
   let tokens = hit.tokens
   if (hit.tool === 'Read') {
-    const size = await $.fs
-      .stat(hit.key)
-      .then(s => s.size)
-      .catch(() => undefined)
-    if (size !== undefined) {
-      tokens = Math.ceil(size / 4)
+    const current = await sizeOf($, hit.key)
+    if (current !== undefined) {
+      tokens = current
       if (tokens < GUARD_FLOOR) return undefined
     }
   }
@@ -597,6 +646,8 @@ const handoffPressed = async ($: EngineInterface) => {
 // warning, and a pane still without figures is measured again
 const onTick = async ($: EngineInterface, options: PluginOptions) => {
   const open = await isOpen($)
+  // A settings file edited mid-session moves the countdown with it
+  await readPin($).catch(() => undefined)
   const l = await read($, live)
   const now = await $.clock.now()
   // A closed pane has no countdown to move
@@ -650,6 +701,7 @@ export const register: Register = (on, options) => {
       argumentHint: '[on|off|full|compact|handoff|stats|guards [clear]]',
     })
     await loadGuards($).catch(() => undefined)
+    await readPin($).catch(() => undefined)
     isRunning = false
     // The terminal docks the pane; everywhere else the strip above the prompt
     // shows the context, and the pane opens from it

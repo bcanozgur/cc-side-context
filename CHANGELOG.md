@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.9.0 · unreleased
+
+**New: a context strip above the prompt**
+
+- One row over the prompt shows the verdict, the share of the window in use, the meter with the limit marked on it, and the room left, so the context can be watched without the pane taking a column. **Details** opens the pane; **Compact** joins it near the limit.
+- Desktop app: the strip is where the context shows, and the pane no longer opens by itself; it opens from **Details**. Terminal: the strip draws the pane's own bar, and steps aside while the pane is docked.
+- With the pane closed, the breakdown is still read on each response while the strip shows, so its parts never go stale.
+
+**Desktop app: the meter**
+
+- The limit is a pin through the bar, standing out above and below it, with 0 and the window on either side. Parts past the limit keep their colours; the room past it is fainter, window better not reached.
+- The summary leads with the room left before the limit (`186.0k left before the 250.0k quality limit`), then this session's figures, then the plan's on a line of its own.
+- The meter holds still while a turn runs, unless the context moves 2% of the window or 20 seconds pass, so the desktop does not reload its frame on every step.
+- The bar is drawn in the page's own boxes, which redraw in place: it no longer blinks with every response. The lens shows only under the pointer.
+- Every part on the meter can be read under the lens, even a sliver thinner than a column.
+
+**Windows**
+
+- Paths with backslashes or a drive letter are shown short, and a guard matches them whatever their case or slashes.
+- The resume list finds past sessions from `USERPROFILE` when there is no `HOME`, and next to a backslashed transcript path.
+- CI runs on Linux, macOS and Windows.
+
+**Fixes**
+
+- **A pane whose tab you shut opens again.** Closing the pane's tab without the engine hearing of it left **Details** and `/side-context` thinking it was open; they now go by what you see.
+- **Scrolling up from the bottom of the pane lets go of the end.** A slow wheel up, a row at a time, was pulled back to the bottom.
+- **The cache countdown follows Claude Code's own cache setting.** `cacheTtl: auto` now reads `promptCacheTtl` and `CLAUDE_CODE_PROMPT_CACHE_TTL`, `FORCE_PROMPT_CACHING_5M` and `ENABLE_PROMPT_CACHING_1H` (from the shell or a settings file's `env`), in Claude Code's own order. Before, it guessed from the plan alone.
+- **A subscription past its plan limit counts down five minutes.** Once a 5h or 7d window is used up the session draws on usage credits, where Claude Code gives the main conversation the five-minute cache; the countdown said an hour.
+- **A guarded read is sized as the eaters are.** Whether a file has shrunk below the guard's floor was judged at four bytes a token, so accented, non-Latin and CJK text read smaller than it is, and a guarded file could slip through.
+
+**Docs**
+
+- The README names the requirement as Claude Code mods, on by default from 2.1.287 (desktop app 2.1.286), describes the strip, lists everything the mod hooks in your session, and compares it with other context mods.
+
 ## 0.8.3 · 2026-10-25
 
 **Desktop app: a lens over the meter**

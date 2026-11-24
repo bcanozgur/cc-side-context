@@ -5,6 +5,7 @@ import type { TestBody } from 'claude-code/testing'
 import { EaterIndex, GUARD_TTL, agoOf, bashKey, commandOf, eatersOf, estimate, fitWidth, guardHit, projectSlug, targetOf, titleOf, widthOf } from '../hooks/analysis'
 import { shownEaters } from '../hooks/pane'
 import { unfollowOffset } from '../hooks/pane-web'
+import { pinOf } from '../hooks/register'
 
 const PANE = 'side-context'
 const START = { cwd: '/tmp', surface: 'terminal', isInteractive: true } as const
@@ -396,6 +397,51 @@ test('counts down the prompt cache, and warns once when it goes cold', async ($,
   expect(toasts.filter(t => t.includes('Prompt cache expired')).length).toBe(1)
 })
 
+test("the cache countdown follows Claude Code's own TTL setting and env", async ($, on) => {
+  const { clock } = engine(on)
+  // CLAUDE_CODE_PROMPT_CACHE_TTL=1h on an API key session, which would be five minutes
+  on('env.get', (_$, e) => ({ value: e.name === 'CLAUDE_CODE_PROMPT_CACHE_TTL' ? '1h' : undefined }))
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  await $.turn.complete(turn)
+  const pane = await mount($)
+  expect(JSON.stringify(await pane.drawn())).toContain('cache 60m')
+  await clock.advance(6 * 60_000)
+  expect(JSON.stringify(await pane.drawn())).not.toContain('cache cold')
+})
+
+test('pinOf takes Claude Code’s order: force 5m, the env var, the setting, then enable 1h', () => {
+  const env = (vars: Record<string, string>) => (k: string) => vars[k]
+  expect(pinOf(env({}), {})).toBeUndefined()
+  expect(pinOf(env({ ENABLE_PROMPT_CACHING_1H: '1' }), {})).toBe('1h')
+  expect(pinOf(env({ ENABLE_PROMPT_CACHING_1H: '1' }), { promptCacheTtl: '5m' })).toBe('5m')
+  expect(pinOf(env({ CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }), { promptCacheTtl: '5m' })).toBe('1h')
+  expect(pinOf(env({ FORCE_PROMPT_CACHING_5M: 'true', CLAUDE_CODE_PROMPT_CACHE_TTL: '1h' }), {})).toBe('5m')
+  expect(pinOf(env({ CLAUDE_CODE_PROMPT_CACHE_TTL: '30m' }), {})).toBeUndefined()
+})
+
+test('a promptCacheTtl in a settings file, or its env block, sets the countdown', async ($, on) => {
+  engine(on)
+  on('settings.read', () => ({ value: { env: { ENABLE_PROMPT_CACHING_1H: '1' } } }))
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  await $.turn.complete(turn)
+  expect(JSON.stringify(await (await mount($)).drawn())).toContain('cache 60m')
+})
+
+test('a subscription past its plan limit is on credits, and back to the five-minute cache', async ($, on) => {
+  const within: SessionUsage = { ...usage, rateLimits: [{ kind: 'five_hour', percentUsed: 40 }] }
+  const over: SessionUsage = { ...usage, rateLimits: [{ kind: 'five_hour', percentUsed: 100 }] }
+  engine(on, within)
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  await $.turn.complete(turn)
+  const pane = await mount($)
+  expect(JSON.stringify(await pane.drawn())).toContain('cache 60m')
+  await $.session.measure({ context: usage.context, rateLimits: over.rateLimits, changed: ['rateLimits'] })
+  expect(JSON.stringify(await pane.drawn())).toContain('cache 5m')
+})
+
 // One model request of a turn, read to its end as the engine reads it
 const step = async ($: Parameters<TestBody>[0], index: number, agentId?: string) => {
   const stream = $.turn.step({ turnId: 'turn', index, model: 'claude-opus-5-5', messageCount: index + 1, ...(agentId ? { agentId } : {}) })
@@ -732,7 +778,7 @@ test('Windows paths are shown short, and a guard matches them whatever their cas
   // a backslash elsewhere is still a shell escape, as on macOS and Linux
   expect(commandOf('grep -n "a\\|b" hooks/register.tsx')).toBe('grep hooks/register.tsx')
 
-  const guard = { tool: 'Read', key: 'C:\\repo\\src\\big.ts', label: 'src/big.ts', tokens: 5_000 }
+  const guard = { tool: 'Read' as const, key: 'C:\\repo\\src\\big.ts', label: 'src/big.ts', tokens: 5_000 }
   expect(guardHit([guard], { tool: 'Read', input: { file_path: 'c:/repo/src/big.ts' } })).toBe(guard)
   expect(guardHit([guard], { tool: 'Read', input: { file_path: 'C:\\repo\\src\\other.ts' } })).toBeUndefined()
   // on macOS a path still matches only as written
@@ -778,6 +824,33 @@ test('x guards the biggest eater: the next whole read is sent back once', async 
   expect((await $.command.run(run('guards'))).text).toContain('Read src/big.ts')
   await $.command.run(run('guards clear'))
   expect((await $.command.run(run('guards'))).text).toContain('No guards')
+})
+
+test('a guarded file is sized as it reads now: CJK text is not counted at a quarter of its bytes', async ($, on) => {
+  engine(on)
+  mock.store(on)
+  const passed: string[] = []
+  on('tool.call', (_$, e) => {
+    passed.push(e.tool)
+    return { result: { text: 'ok' } } as never
+  })
+  // 3,300 bytes of English: some 825 tokens, below the guard's floor
+  let text = 'a'.repeat(3_300)
+  on('fs.stat', () => ({ value: { kind: 'file', size: 3_300, mtimeMs: 0 } }) as never)
+  on('fs.read', () => ({ value: text }) as never)
+  await $.session.start(START)
+  await $.command.run(run('on'))
+  await (await mount($)).press({ key: 'guard' })
+
+  const small = await $.tool.call({ tool: 'Read', file_path: '/repo/src/big.ts' } as never)
+  expect(JSON.stringify(small)).not.toContain('offset/limit')
+  expect(passed).toEqual(['Read'])
+
+  // the same 3,300 bytes as 1,100 CJK characters are some 1,100 tokens: sent back
+  text = '漢'.repeat(1_100)
+  const denied = await $.tool.call({ tool: 'Read', file_path: '/repo/src/big.ts' } as never)
+  expect(JSON.stringify(denied)).toContain('offset/limit')
+  expect(passed).toEqual(['Read'])
 })
 
 test('/side-context stats sums up the session and copies it', async ($, on) => {
