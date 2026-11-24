@@ -953,6 +953,8 @@ test('a resumed session still knows the goal from before its compaction', async 
   expect(note).not.toContain('Summary of the earlier work')
 })
 
+const slashed = (p: string) => p.replace(/\\/g, '/')
+
 test('the handoff keeps itself out of git and keeps the note before it', async ($, on) => {
   engine(on)
   const written: { path: string; text: string }[] = []
@@ -964,10 +966,11 @@ test('the handoff keeps itself out of git and keeps the note before it', async (
   on('fs.exists', () => ({ value: false }))
   await $.session.start(START)
   await $.command.run(run('handoff'))
-  const paths = written.map(w => w.path)
+  // on Windows the test host hands the paths over with backslashes
+  const paths = written.map(w => slashed(w.path))
   expect(paths.some(p => p.endsWith('.claude/side-context/handoff.md'))).toBe(true)
-  expect(written.find(w => w.path.endsWith('handoff.prev.md'))?.text).toBe('# Handoff · earlier')
-  expect(written.find(w => w.path.endsWith('.claude/side-context/.gitignore'))?.text).toContain('*')
+  expect(written.find(w => slashed(w.path).endsWith('handoff.prev.md'))?.text).toBe('# Handoff · earlier')
+  expect(written.find(w => slashed(w.path).endsWith('.claude/side-context/.gitignore'))?.text).toContain('*')
 })
 
 const NOW = 1_000_000
@@ -1112,7 +1115,7 @@ const freshSession = (on: On, env: Record<string, string> = { HOME: '/home/me' }
       value: Object.entries(past).map(([name, f]) => ({ name, kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink: false })),
     } as never
   })
-  on('fs.read', (_$, e) => ({ value: past[(e as { path: string }).path.split('/').pop() ?? '']?.text ?? '' }) as never)
+  on('fs.read', (_$, e) => ({ value: past[(e as { path: string }).path.split(/[\\/]/).pop() ?? '']?.text ?? '' }) as never)
   const resumed: string[] = []
   on('command.run', { command: 'resume' }, (_$, e) => {
     resumed.push(e.args)
@@ -1172,7 +1175,7 @@ test('on Windows the past sessions are found from USERPROFILE, with no HOME set'
   await clock.settle()
   expect(JSON.stringify(await pane.drawn())).toContain('1 Login bug fix')
   // off Windows the test host takes C:\ for a relative path and puts the cwd in front
-  expect(listed.some(p => p.endsWith(`C:\\Users\\me/.claude/projects/${projectSlug(START.cwd)}`))).toBe(true)
+  expect(listed.some(p => slashed(p).endsWith(`C:/Users/me/.claude/projects/${projectSlug(START.cwd)}`))).toBe(true)
 })
 
 test('on Windows the past sessions are found next to a backslashed transcript path', async ($, on) => {
@@ -1186,7 +1189,7 @@ test('on Windows the past sessions are found next to a backslashed transcript pa
   await pane.press({ key: 'resume' })
   await clock.settle()
   expect(JSON.stringify(await pane.drawn())).toContain('1 Login bug fix')
-  expect(listed.some(p => p.endsWith('C:\\Users\\me\\.claude\\projects\\C--repo'))).toBe(true)
+  expect(listed.some(p => slashed(p).endsWith('C:/Users/me/.claude/projects/C--repo'))).toBe(true)
 })
 
 test('a session already under way does not offer resume', async ($, on) => {
