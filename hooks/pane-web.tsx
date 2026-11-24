@@ -160,13 +160,10 @@ const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number
     .join('')
   const isMarked = budget < span
   const mark = x(budget)
-  // Whatever runs past the mark keeps its part colours under a faint red veil,
-  // so the list's colours still read and the overage still shows
-  const over = snap.tokens > budget && isMarked ? `<rect x="${mark.toFixed(1)}" width="${(x(snap.tokens) - mark).toFixed(1)}" height="${BH}" fill="${HEX.error}" fill-opacity="0.35"/>` : ''
   const bar =
     `<g id="bar" clip-path="url(#r)"><rect width="${W}" height="${BH}" fill="#80808033"/>` +
-    (isMarked ? `<rect x="${mark.toFixed(1)}" width="${(W - mark).toFixed(1)}" height="${BH}" fill="#80808014"/>` : '') +
-    `${rects}${over}` +
+    (isMarked ? `<rect x="${mark.toFixed(1)}" width="${(W - mark).toFixed(1)}" height="${BH}" fill="${TRACK.past}"/>` : '') +
+    `${rects}` +
     // The mark is a separator: a dark gap with a light line down its middle,
     // so it reads against any part colour on either side
     (isMarked ? `<rect x="${(mark - 2).toFixed(1)}" width="4" height="${BH}" fill="#000000" fill-opacity="0.6"/><rect x="${(mark - 0.75).toFixed(1)}" width="1.5" height="${BH}" fill="#e6e6e6"/>` : '') +
@@ -291,15 +288,24 @@ const drawMeter = (m: { snap: Snapshot; delta: number; budget: number; W: number
   )
 }
 
-// A part's colour past the limit: under a faint red veil, so the list's
-// colours still read and the overage still shows
-const veiled = (hex: string): string =>
-  '#' + [1, 3, 5].map(i => Math.round(parseInt(hex.slice(i, i + 2), 16) * 0.65 + parseInt(HEX.error.slice(i, i + 2), 16) * 0.35).toString(16).padStart(2, '0')).join('')
-// The track, and the room past the limit a shade stronger
-const TRACK = { before: '#80808033', past: '#80808043' } as const
+// The track, and the room past the limit a shade fainter: the window is
+// there, but it is better not to reach
+const TRACK = { before: '#80808033', past: '#8080801a' } as const
 
 // A figure on the scale, without a trailing .0: 250k, 1M
-const tickOf = (n: number) => fmt(n).replace(/\.0(?=[kM]?$)/, '')
+export const tickOf = (n: number) => fmt(n).replace(/\.0(?=[kM]?$)/, '')
+
+// The desktop tells the engine which row its window starts at, rounded from
+// the page's own pixels, and at the very bottom that row can lie past the
+// engine's last one (contentRows - bodyRows), which the page measures in
+// whole rows of its body. The engine follows the end while a move lands
+// at or past its last row, and the page, told to follow, scrolls back to the
+// bottom; so a slow wheel up from the bottom, a row at a time, never leaves
+// it. A person's move up lands a row short of the end at least, which lets go.
+export const unfollowOffset = (e: { offset: number; by: number; bodyRows: number; contentRows: number; origin: { kind: string } }): number => {
+  const end = Math.max(0, e.contentRows - e.bodyRows)
+  return e.origin.kind === 'person' && e.by < 0 && end > 0 && e.offset >= end ? end - 1 : e.offset
+}
 
 // A drawing that only sizes its box, the same markup every time: the page
 // keeps it as it is
@@ -309,12 +315,14 @@ const spacerOf = (W: number, H: number) => `<svg xmlns="http://www.w3.org/2000/s
 // redraw in place as the figures move; the lens is a frame over it shown only
 // under the pointer, since a changed drawing is a new frame, blank (opaque on
 // a dark page) until it loads, and the bar would blink with every response.
-// Under the bar its scale, a number line in the page's own type: 0, the limit
-// from its mark, the window at the end, a figure dropped where two would meet.
-// `columns` is the meter's width in the page's cells, to tell where they meet.
+// A drawing that never changes gives the meter the lens's own size, so the
+// lens lies on the bar as drawn; the bar's height is in the page's lines,
+// some twenty pixels each, whatever the drawing does.
+// Its scale is two figures in the page's own type on either side, 0 and the
+// window, read as a number line; the mark says where the limit is.
 export const meterBox = (
   ui: Ui,
-  m: Parameters<typeof meterSource>[0] & { slot: 'pane' | 'strip'; isFull: boolean; columns: number; alt: string; turn: { isRunning: boolean; now: number } },
+  m: Parameters<typeof meterSource>[0] & { slot: 'pane' | 'strip'; isFull: boolean; alt: string; turn: { isRunning: boolean; now: number } },
 ) => {
   const { Box, Text } = ui
   const Svg = 'Svg' in ui ? ui.Svg : undefined
@@ -332,69 +340,48 @@ export const meterBox = (
   const pieces: Piece[] = parts.map(p => ({ from: at, to: (at += p.tokens), color: p.color, isPart: true }))
   if (at < span) pieces.push({ from: at, to: span, color: TRACK.before, isPart: false })
   const before = pieces.filter(p => p.from < cut).map(p => ({ ...p, to: Math.min(p.to, cut) }))
-  const past = pieces.filter(p => p.to > cut).map(p => ({ ...p, from: Math.max(p.from, cut), color: p.isPart ? veiled(p.color) : TRACK.past }))
+  const past = pieces.filter(p => p.to > cut).map(p => ({ ...p, from: Math.max(p.from, cut), color: p.isPart ? p.color : TRACK.past }))
   // A part of 1k or more is never thinner than a sliver
   const piece = (p: Piece) => (
     <Box width={0} flexGrow={weight(p.to - p.from)} minWidth={p.isPart && p.to - p.from >= 1_000 ? 0.2 : 0} height="100%" backgroundColor={p.color} />
   )
-  // The mark is a separator: a dark gap with a light line down its middle, so
-  // it reads against any part colour on either side
-  const mark = (
-    <Box flexShrink={0} width={0.5} height="100%" backgroundColor="#00000099" justifyContent="center">
-      <Box width={0.2} height="100%" backgroundColor="#e6e6e6" />
+  // The limit is a pin through the bar, standing out above and below it, so
+  // it reads over any part colour; a mid grey, as clear on a light page as
+  // on a dark one
+  const pin = isMarked && (
+    <Box position="absolute" top={0} bottom={0} left={0} right={0} alignItems="center">
+      <Box width="100%" height={BH / 20 + 0.6}>
+        <Box width={0} flexGrow={weight(cut)} minWidth={0} />
+        <Box flexShrink={0} width={0.35} height="100%" backgroundColor="#707070" />
+        <Box width={0} flexGrow={weight(span - cut)} minWidth={0} />
+      </Box>
     </Box>
   )
   const scope = `side-context-meter-${m.slot}`
   const lens = steadyMeter(m.slot, m, m.turn)
-
-  const tick = (text: string) => <Text dimColor wrap="truncate">{text}</Text>
-  const end = tickOf(snap.window)
-  const limit = tickOf(budget)
-  // The limit's figure leans on its mark from the side with room: after it
-  // with the window's past it, else before it, else alone at the end
-  const left = (cut / span) * m.columns
-  const right = m.columns - left
-  const side = right >= limit.length + end.length + 2 ? 'after' : left >= limit.length + 3 ? 'before' : 'end'
-  const scale = isMarked ? (
-    <Box width="100%">
-      <Box width={0} flexGrow={weight(cut)} minWidth={0} justifyContent="space-between">
-        {left >= 2 && tick('0')}
-        {side === 'before' && tick(limit)}
-      </Box>
-      <Box
-        width={0}
-        flexGrow={weight(span - cut)}
-        minWidth={side === 'end' ? limit.length + 1 : 0}
-        justifyContent={side === 'after' ? 'space-between' : 'flex-end'}
-        paddingLeft={side === 'before' ? 1 : 0}
-      >
-        {side !== 'before' && tick(limit)}
-        {side !== 'end' && right >= end.length + 1 && tick(end)}
-      </Box>
-    </Box>
-  ) : (
-    <Box width="100%" justifyContent="space-between">
-      {tick('0')}
-      {tick(end)}
+  const figure = (text: string) => (
+    <Box flexShrink={0}>
+      <Text dimColor>{text}</Text>
     </Box>
   )
 
   return (
-    <Box flexDirection="column" width={m.isFull ? '100%' : undefined} flexShrink={0}>
-      <Box width={m.isFull ? '100%' : undefined} hover={{ scope, backgroundColor: '#00000000' }}>
+    <Box width={m.isFull ? '100%' : undefined} flexShrink={0} alignItems="center">
+      {figure('0')}
+      <Box flexGrow={m.isFull ? 1 : 0} flexShrink={m.isFull ? 1 : 0} minWidth={0} marginX={1} hover={{ scope, backgroundColor: '#00000000' }}>
         <Svg source={spacerOf(W, H)} alt={m.alt} width={W} height={H} />
-        <Box position="absolute" top={0} bottom={0} left={0} right={0} flexDirection="column" justifyContent="center">
-          <Box width="100%" height={`${Math.round((BH / H) * 100)}%`} overflow="hidden" borderStyle="round" borderColor="#00000000" padding={0}>
+        <Box position="absolute" top={0} bottom={0} left={0} right={0} alignItems="center">
+          <Box width="100%" height={BH / 20} overflow="hidden" borderStyle="round" borderColor="#00000000" padding={0}>
             {before.map(piece)}
-            {isMarked && mark}
             {past.map(piece)}
           </Box>
         </Box>
+        {pin}
         <Box position="absolute" top={0} bottom={0} left={0} right={0} display="none" hover={{ scope, display: 'flex' }}>
           <Svg source={lens} alt={m.alt} width={W} height={H} isInteractive />
         </Box>
       </Box>
-      {scale}
+      {figure(tickOf(snap.window))}
     </Box>
   )
 }
@@ -510,7 +497,6 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
           BH: 20,
           H: 40,
           isFull: true,
-          columns: Math.max(10, d.columns - 4),
           alt: `${windowShare}% of the ${fmt(snap.window)} window in use${isMarked ? `, ${limitLabel} marked at ${fmt(budget)}` : ''}`,
           turn: { isRunning: d.isRunning === true, now: d.now },
         })}
@@ -548,12 +534,26 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
   const replied = d.live.lastReply
   const left = replied === null ? 0 : replied + d.ttl - d.now
   const isCold = replied !== null && left <= 0
-  const facts = [
+  // Under the meter, by what decides the next step: the room left before the
+  // limit, then this session's figures, then the plan's
+  const session = [
+    `${fmt(snap.tokens)} used`,
     ...(d.live.delta > 0 ? [`+${fmt(d.live.delta)} this turn`] : []),
     ...(replied === null ? [] : [isCold ? 'cache cold' : `cache ${Math.max(1, Math.ceil(left / 60_000))}m`]),
-    ...snap.limits.map(l => `${limitName(l.kind)} ${Math.round(l.percent)}%`),
     ...(snap.cost !== undefined && snap.cost >= 0.01 ? [`$${snap.cost.toFixed(2)}`] : []),
   ]
+  const plan = snap.limits.map(l => `${limitName(l.kind)} ${Math.round(l.percent)}%`)
+  const line = (key: string, label: string | undefined, facts: string[]) =>
+    facts.length > 0 && (
+      <Box key={key} width="100%" {...clip}>
+        <Text dimColor wrap="truncate-end">
+          {label !== undefined && <Text>{`${label}  `}</Text>}
+          {facts.map((f, i) => (
+            <Text color={f === 'cache cold' ? 'warning' : undefined}>{`${i > 0 ? ' · ' : ''}${f}`}</Text>
+          ))}
+        </Text>
+      </Box>
+    )
 
   const summary = card(
     'summary',
@@ -572,40 +572,14 @@ export const drawWebPane = (ui: Ui, d: PaneData, actions: PaneActions) => {
         </Box>
       </Box>
       {meter()}
-      <Box width="100%" justifyContent="space-between">
-        <Box flexShrink={1} {...clip}>
-          <Text dimColor wrap="truncate-end">
-            {`${fmt(snap.tokens)} of ${fmt(snap.window)} window`}
-          </Text>
-        </Box>
-        {limitLabel === 'window' && (
-          <Box flexShrink={0} paddingLeft={1}>
-            <Text dimColor>{`${fmt(Math.max(0, room))} left`}</Text>
-          </Box>
-        )}
+      <Box width="100%" {...clip}>
+        <Text wrap="truncate-end">
+          {room >= 0 ? <Text bold>{`${fmt(room)} left`}</Text> : <Text bold color="error">{`${fmt(-room)} over`}</Text>}
+          <Text dimColor>{` ${room >= 0 ? 'before' : 'past'} the ${fmt(budget)} ${limitLabel}`}</Text>
+        </Text>
       </Box>
-      {limitLabel !== 'window' && (
-        <Box width="100%" justifyContent="space-between">
-          <Box flexShrink={1} {...clip}>
-            <Text dimColor wrap="truncate-end">
-              <Text color={HEX.mark}>{'┃ '}</Text>
-              {`${limitLabel.charAt(0).toUpperCase()}${limitLabel.slice(1)} ${fmt(budget)}`}
-            </Text>
-          </Box>
-          <Box flexShrink={0} paddingLeft={1}>
-            {room >= 0 ? <Text dimColor>{`${fmt(room)} left`}</Text> : <Text color="error">{`${fmt(-room)} over`}</Text>}
-          </Box>
-        </Box>
-      )}
-      {facts.length > 0 && (
-        <Box width="100%" {...clip}>
-          <Text dimColor wrap="truncate-end">
-            {facts.map((f, i) => (
-              <Text color={f === 'cache cold' ? 'warning' : undefined}>{`${i > 0 ? ' · ' : ''}${f}`}</Text>
-            ))}
-          </Text>
-        </Box>
-      )}
+      {line('session', undefined, session)}
+      {line('plan', 'Plan', plan)}
       {next && (
         <Box width="100%" justifyContent="space-between" alignItems="center" flexWrap="wrap" marginTop={1}>
           <Box flexShrink={1} marginTop={1} marginRight={1} {...clip}>

@@ -23,7 +23,7 @@ import {
   toolTokens,
   widthOf,
 } from './analysis'
-import { drawWebPane } from './pane-web'
+import { drawWebPane, unfollowOffset } from './pane-web'
 import { TITLE, drawPane, glyphOf, nextGuard, scaled, shownEaters, top } from './pane'
 import { drawStrip } from './strip'
 
@@ -136,7 +136,7 @@ export const toSnapshot = (
     percent: context.percent ?? percentOf(tokens, window),
     compactAt: b?.isAutoCompactEnabled ? b.autoCompactThreshold : undefined,
     rows: categories.map(c => ({ name: c.name, tokens: c.tokens, color: c.color, kind: c.kind })),
-    memory: top((b?.memoryFiles ?? []).map(f => ({ name: f.path.split('/').slice(-2).join('/'), tokens: f.tokens }))),
+    memory: top((b?.memoryFiles ?? []).map(f => ({ name: f.path.split(/[\\/]/).slice(-2).join('/'), tokens: f.tokens }))),
     mcp: top(
       (b?.mcpTools ?? [])
         .filter(t => t.isLoaded)
@@ -325,10 +325,11 @@ let transcriptDir: string | null = null
 const transcriptsOf = async ($: EngineInterface): Promise<string | undefined> => {
   if (transcriptDir !== null && (await $.fs.exists(transcriptDir).catch(() => false))) return transcriptDir
   const cwd = await $.session.cwd()
-  const home = await $.env.get('HOME').catch(() => undefined)
+  // Windows has no HOME as a rule, only USERPROFILE
+  const home = (await $.env.get('HOME').catch(() => undefined)) ?? (await $.env.get('USERPROFILE').catch(() => undefined))
   const config = (await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)) ?? (home ? `${home}/.claude` : undefined)
   if (!config) return undefined
-  const dir = `${config.replace(/\/+$/, '')}/projects/${projectSlug(cwd)}`
+  const dir = `${config.replace(/[\\/]+$/, '')}/projects/${projectSlug(cwd)}`
   return (await $.fs.exists(dir).catch(() => false)) ? dir : undefined
 }
 
@@ -399,7 +400,14 @@ const open = async ($: EngineInterface) => {
   await update($, paneOpen, () => true)
 }
 
+const paneOf = async ($: EngineInterface) => (await $.ui.panes()).find(p => p.id === PANE)
+
 const show = async ($: EngineInterface) => {
+  // A pane the engine still holds that the person no longer sees (its tab shut
+  // by a mark that never reached the engine) is opened afresh, so the surface
+  // seats it again rather than taking the open for one it already has
+  const held = await paneOf($)
+  if (held && !held.isShown) await $.ui.close({ id: PANE })
   await open($)
   await refresh($, 'summary')
   await scan($)
@@ -410,6 +418,10 @@ const hide = async ($: EngineInterface) => {
   await $.ui.close({ id: PANE })
   await update($, paneOpen, () => false)
 }
+
+// Details and a bare /side-context go by what the person sees, not by the last
+// open or close the plugin heard
+const toggle = async ($: EngineInterface) => ((await paneOf($))?.isShown ? hide($) : show($))
 
 // The prompt cache lasts five minutes on an API key and an hour on a
 // subscription; a subscription is the session that reports rate limits
@@ -711,8 +723,8 @@ export const register: Register = (on, options) => {
     const known = ['', 'on', 'show', 'off', 'hide', 'full']
     if (!known.includes(arg)) return { text: `Unknown option "${arg}". /side-context help lists them.` }
 
-    const open = await isOpen($)
-    if (arg === 'off' || arg === 'hide' || (arg === '' && open)) {
+    const shown = (await paneOf($))?.isShown === true
+    if (arg === 'off' || arg === 'hide' || (arg === '' && shown)) {
       await hide($)
       return { text: 'Context pane hidden. /side-context brings it back.' }
     }
@@ -770,7 +782,9 @@ export const register: Register = (on, options) => {
   // from the transcript until its first response reports its own
   on('classic.SessionStart', async ($, e, next) => {
     const path = (e as { transcript_path?: unknown }).transcript_path
-    if (typeof path === 'string' && path.includes('/')) transcriptDir = path.slice(0, path.lastIndexOf('/'))
+    // C:\Users\me\.claude\projects\… on Windows
+    const cut = typeof path === 'string' ? Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) : -1
+    if (typeof path === 'string' && cut > 0) transcriptDir = path.slice(0, cut)
     if (e.source === 'resume' || e.source === 'fork' || e.source === 'clear') {
       const tokens = typeof e.context_tokens === 'number' && e.context_tokens > 0 ? e.context_tokens : null
       const since = typeof e.seconds_since_last_response === 'number' ? e.seconds_since_last_response : undefined
@@ -851,6 +865,12 @@ export const register: Register = (on, options) => {
     return deny ? { deny } : next(e)
   }).catch(($, e, next) => next(e))
 
+  // Scrolling up from the pane's bottom lets go of the end (unfollowOffset)
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const offset = unfollowOffset(e)
+    return next(offset === e.offset ? e : { ...e, offset })
+  })
+
   // The person's close mark
   on('ui.close', { id: PANE }, async ($, e, next) => {
     const result = await next(e)
@@ -883,7 +903,7 @@ export const register: Register = (on, options) => {
         now: await $.clock.now(),
       },
       {
-        details: () => void (isPaneOpen ? hide($) : show($)).catch(() => undefined),
+        details: () => void toggle($).catch(() => undefined),
         compact: () => void compact($),
       },
     )

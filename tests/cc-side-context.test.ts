@@ -2,8 +2,9 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On, SessionMessage, SessionUsage, UiPane } from 'claude-code'
 import type { TestBody } from 'claude-code/testing'
 
-import { EaterIndex, GUARD_TTL, agoOf, bashKey, commandOf, eatersOf, estimate, fitWidth, projectSlug, titleOf, widthOf } from '../hooks/analysis'
+import { EaterIndex, GUARD_TTL, agoOf, bashKey, commandOf, eatersOf, estimate, fitWidth, guardHit, projectSlug, targetOf, titleOf, widthOf } from '../hooks/analysis'
 import { shownEaters } from '../hooks/pane'
+import { unfollowOffset } from '../hooks/pane-web'
 
 const PANE = 'side-context'
 const START = { cwd: '/tmp', surface: 'terminal', isInteractive: true } as const
@@ -184,8 +185,8 @@ test('draws the breakdown on every surface', async ($, on) => {
       expect(drawn).toContain('Filling up')
       expect(drawn).toContain('"type":"Svg"')
       expect(drawn).toContain('42% of the 200.0k window in use, auto-compact marked at 167.0k')
-      expect(drawn).toContain('84.0k of 200.0k window')
-      expect(drawn).toContain('Auto-compact 167.0k')
+      expect(drawn).toContain('84.0k used')
+      expect(drawn).toContain(' before the 167.0k auto-compact')
       // every part in a colour of its own, the same on its dot and its stretch of the meter
       expect(drawn).toContain('#3fa877')
       expect(drawn).toContain('#d9a521')
@@ -240,6 +241,28 @@ test('the exact count is the one that flags a row as too large', async ($, on) =
   expect(drawn).toContain('Exact count')
   expect(drawn).not.toContain('may be large')
   expect(drawn).toContain('Exact count')
+})
+
+test('a pane whose tab the person shut without the engine hearing opens again from Details and /side-context', async ($, on) => {
+  const { panes, clock } = engine(on)
+  await $.session.start({ ...START, surface: 'desktop' })
+  const band = await strip($, 'desktop')
+  await clock.settle()
+
+  await band.press({ key: 'details' })
+  await clock.settle()
+  expect(panes.map(p => p.id)).toEqual([PANE])
+
+  // the desktop drops the tab from view; the engine still lists the pane,
+  // which Details closes and opens again rather than hiding
+  panes[0] = { ...panes[0]!, isShown: false }
+  await band.press({ key: 'details' })
+  await clock.settle()
+  expect(panes.map(p => [p.id, p.isShown])).toEqual([[PANE, true]])
+
+  panes[0] = { ...panes[0]!, isShown: false }
+  expect((await $.command.run(run(''))).text).toBe('Context pane shown.')
+  expect(panes.map(p => [p.id, p.isShown])).toEqual([[PANE, true]])
 })
 
 test('storage draws /context grid and its rows, and list goes back', async ($, on) => {
@@ -478,20 +501,25 @@ test('on the page a 1M window fills the whole bar, the quality limit marked on i
     props: { title: 'Context', isFocused: false, bodyColumns: 40, placement: 'dock' } as never,
   })
   const drawn = JSON.stringify(await pane.drawn())
-  expect(drawn).toContain('64.0k of 1.0M window')
   expect(drawn).toContain('["6%"]')
-  expect(drawn).toContain('Quality limit 250.0k')
-  expect(drawn).toContain('186.0k left')
+  // under it the room left first, then what the session has used
+  expect(drawn).toContain('["186.0k left"]')
+  expect(drawn).toContain('[" before the 250.0k quality limit"]')
+  expect(drawn).toContain('["64.0k used"]')
   expect(drawn).toContain('6% of the 1.0M window in use, quality limit marked at 250.0k')
   // the mark sits a quarter of the way along, on the lens's bar and the page's
   expect(drawn).toContain('x=\\"88.0\\" width=\\"4\\"')
-  expect(drawn).toContain('"flexGrow":186,"minWidth":0,"height":"100%","backgroundColor":"#80808033"}},{"type":"Box","props":{"flexShrink":0,"width":0.5')
-  expect(drawn).toContain('"flexGrow":750,"minWidth":0,"height":"100%","backgroundColor":"#80808043"')
-  // under it a number line in the page's own type: 0, the limit from its
-  // mark, the window at the end
-  const tick = (text: string) => `{"type":"Text","props":{"dimColor":true,"wrap":"truncate"},"children":["${text}"]}`
-  expect(drawn).toContain(`"flexGrow":250,"minWidth":0,"justifyContent":"space-between"},"children":[${tick('0')}]}`)
-  expect(drawn).toContain(`"justifyContent":"space-between","paddingLeft":0},"children":[${tick('250k')},${tick('1M')}]}`)
+  expect(drawn).toContain('"flexGrow":186,"minWidth":0,"height":"100%","backgroundColor":"#80808033"}}')
+  expect(drawn).toContain('{"type":"Box","props":{"width":0,"flexGrow":250,"minWidth":0}},{"type":"Box","props":{"flexShrink":0,"width":0.35')
+  // past the limit the track a shade fainter
+  expect(drawn).toContain('"flexGrow":750,"minWidth":0,"height":"100%","backgroundColor":"#8080801a"')
+  // a bar a line tall, its height the page's own, not a share of a drawing
+  expect(drawn).toContain('"width":"100%","height":1,"overflow":"hidden"')
+  // either side of it its scale in the page's own type, read as a number
+  // line: 0 and the window
+  const figure = (text: string) => `{"type":"Box","props":{"flexShrink":0},"children":[{"type":"Text","props":{"dimColor":true},"children":["${text}"]}]}`
+  expect(drawn).toContain(`"alignItems":"center"},"children":[${figure('0')}`)
+  expect(drawn).toContain(`${figure('1M')}]}`)
 })
 
 test('on the page a part thinner than a column is still named under the pointer', async ($, on) => {
@@ -693,6 +721,22 @@ test('a Bash row says what the command did, not how it was spelled', async () =>
   expect(commandOf('npm test &> out.log')).toBe('npm test')
   expect(commandOf('make build > build.log 2>&1 && ./run.sh')).toBe('make build && run.sh')
   expect(commandOf('cd /repo && ls && git diff && git log && cat hooks/register.tsx', '/repo').length).toBeLessThanOrEqual(40)
+})
+
+test('Windows paths are shown short, and a guard matches them whatever their case or slashes', async () => {
+  const cwd = 'C:\\repo'
+  expect(targetOf({ tool: 'Read', input: { file_path: 'C:\\repo\\hooks\\register.tsx' } }, cwd)).toBe('hooks/register.tsx')
+  expect(targetOf({ tool: 'Read', input: { file_path: 'c:/repo/README.md' } }, cwd)).toBe('README.md')
+  expect(targetOf({ tool: 'Read', input: { file_path: 'D:\\other\\deep\\dir\\file.ts' } }, cwd)).toBe('dir/file.ts')
+  expect(commandOf('cat C:\\repo\\hooks\\analysis.ts', cwd)).toBe('cat hooks/analysis.ts')
+  // a backslash elsewhere is still a shell escape, as on macOS and Linux
+  expect(commandOf('grep -n "a\\|b" hooks/register.tsx')).toBe('grep hooks/register.tsx')
+
+  const guard = { tool: 'Read', key: 'C:\\repo\\src\\big.ts', label: 'src/big.ts', tokens: 5_000 }
+  expect(guardHit([guard], { tool: 'Read', input: { file_path: 'c:/repo/src/big.ts' } })).toBe(guard)
+  expect(guardHit([guard], { tool: 'Read', input: { file_path: 'C:\\repo\\src\\other.ts' } })).toBeUndefined()
+  // on macOS a path still matches only as written
+  expect(guardHit([{ ...guard, key: '/repo/src/big.ts' }], { tool: 'Read', input: { file_path: '/Repo/src/big.ts' } })).toBeUndefined()
 })
 
 test('an eater needs a hundredth of the budget for a row, so x never guards a hidden one', async () => {
@@ -955,21 +999,25 @@ const past: Record<string, { text: string; mtimeMs: number }> = {
 }
 
 // A fresh session in a project with past transcripts
-const freshSession = (on: On) => {
+const freshSession = (on: On, env: Record<string, string> = { HOME: '/home/me' }) => {
   const { clock } = engine(on, usage, () => [])
-  mock.env(on, { HOME: '/home/me' })
+  mock.env(on, env)
   on('session.id', () => ({ value: 'current' }))
   on('fs.exists', () => ({ value: true }))
-  on('fs.list', () => ({
-    value: Object.entries(past).map(([name, f]) => ({ name, kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink: false })),
-  }))
+  const listed: string[] = []
+  on('fs.list', (_$, e) => {
+    listed.push((e as { path: string }).path)
+    return {
+      value: Object.entries(past).map(([name, f]) => ({ name, kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink: false })),
+    } as never
+  })
   on('fs.read', (_$, e) => ({ value: past[(e as { path: string }).path.split('/').pop() ?? '']?.text ?? '' }) as never)
   const resumed: string[] = []
   on('command.run', { command: 'resume' }, (_$, e) => {
     resumed.push(e.args)
     return { text: '' }
   })
-  return { clock, resumed }
+  return { clock, resumed, listed }
 }
 
 test('a fresh session offers its project\'s past sessions, and a number resumes one', async ($, on) => {
@@ -1014,6 +1062,32 @@ test('once the conversation starts, resume is gone', async ($, on) => {
   expect(drawn).not.toContain('"key":"resume"')
 })
 
+test('on Windows the past sessions are found from USERPROFILE, with no HOME set', async ($, on) => {
+  const { clock, listed } = freshSession(on, { USERPROFILE: 'C:\\Users\\me' })
+  await $.session.start(START)
+  const pane = await mount($)
+  await clock.settle()
+  await pane.press({ key: 'resume' })
+  await clock.settle()
+  expect(JSON.stringify(await pane.drawn())).toContain('1 Login bug fix')
+  // off Windows the test host takes C:\ for a relative path and puts the cwd in front
+  expect(listed.some(p => p.endsWith(`C:\\Users\\me/.claude/projects/${projectSlug(START.cwd)}`))).toBe(true)
+})
+
+test('on Windows the past sessions are found next to a backslashed transcript path', async ($, on) => {
+  // Neither HOME nor USERPROFILE: only the path Claude Code gave at the start can find them
+  const { clock, listed } = freshSession(on, {})
+  on('classic.SessionStart', () => ({}))
+  await $.session.start(START)
+  await $.classic.SessionStart({ source: 'startup', transcript_path: 'C:\\Users\\me\\.claude\\projects\\C--repo\\current.jsonl' } as never)
+  const pane = await mount($)
+  await clock.settle()
+  await pane.press({ key: 'resume' })
+  await clock.settle()
+  expect(JSON.stringify(await pane.drawn())).toContain('1 Login bug fix')
+  expect(listed.some(p => p.endsWith('C:\\Users\\me\\.claude\\projects\\C--repo'))).toBe(true)
+})
+
 test('a session already under way does not offer resume', async ($, on) => {
   const { clock } = engine(on)
   await $.session.start(START)
@@ -1036,12 +1110,12 @@ test('a past session is named by /rename, then by Claude, then by its first prom
   expect(agoOf(5 * 60_000)).toBe('5m ago')
 })
 
-const strip = ($: Parameters<TestBody>[0], surface: 'terminal' | 'desktop') =>
+const strip = ($: Parameters<TestBody>[0], surface: 'terminal' | 'desktop', bodyColumns = 100) =>
   $.ui.mount({
     plugin: 'cc-side-context',
     surface,
     component: 'AbovePrompt',
-    props: { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns: 100 } as never,
+    props: { hasSurvey: false, isWorking: false, maxRows: 6, bodyColumns } as never,
   })
 
 test('off the terminal the strip shows the context and opens the pane on demand', async ($, on) => {
@@ -1054,7 +1128,10 @@ test('off the terminal the strip shows the context and opens the pane on demand'
   let drawn = JSON.stringify(await band.drawn())
   expect(drawn).toContain('Filling up')
   expect(drawn).toContain('42%')
-  expect(drawn).toContain('84.0k of 167.0k · 83.0k left')
+  // the scale gives the window, so the words keep the room left and of which
+  // limit, parted from the meter by a faint rule
+  expect(drawn).toContain('["83.0k left of 167k"]')
+  expect(drawn).toContain('"key":"rule-room"')
   expect(drawn).toContain('"type":"Svg"')
   // the pane's meter, smaller: each part in its colour, the lens under the
   // pointer naming the part and its size
@@ -1068,11 +1145,10 @@ test('off the terminal the strip shows the context and opens the pane on demand'
   // the whole window, the room left in it named under the lens too
   expect(drawn).toContain('42% of the 200.0k window in use, limit at 167.0k')
   expect(drawn).toContain('>Free</tspan>')
-  // its scale: the limit near the end leans on its mark from before it, so
-  // the window's figure keeps the end
-  const tick = (text: string) => `{"type":"Text","props":{"dimColor":true,"wrap":"truncate"},"children":["${text}"]}`
-  expect(drawn).toContain(`"justifyContent":"space-between"},"children":[${tick('0')},${tick('167k')}]}`)
-  expect(drawn).toContain(`"paddingLeft":1},"children":[${tick('200k')}]}`)
+  // its scale either side of it: 0 and the window
+  const figure = (text: string) => `{"type":"Box","props":{"flexShrink":0},"children":[{"type":"Text","props":{"dimColor":true},"children":["${text}"]}]}`
+  expect(drawn).toContain(`"alignItems":"center"},"children":[${figure('0')}`)
+  expect(drawn).toContain(`${figure('200k')}]}`)
   expect(drawn).toContain('"label":"Details"')
   expect(drawn).not.toContain('"key":"compact"')
 
@@ -1138,7 +1214,7 @@ test('the strip bar moves with each step, its lens frame shown only under the po
   await step($, 0)
   await clock.settle()
   drawn = JSON.stringify(await band.drawn())
-  expect(drawn).toContain('84.6k of 167.0k')
+  expect(drawn).toContain('82.4k left')
   expect(drawn.match(/"flexGrow":[\d.]+/g)?.join()).not.toBe(bar)
   expect(await svgOf()).toBe(before)
 
@@ -1163,7 +1239,8 @@ test('with the pane closed the strip still reads the breakdown as the context gr
   const current: SessionUsage = { ...usage }
   const { panes, clock } = engine(on, current)
   await $.session.start({ ...START, surface: 'desktop' })
-  const band = await strip($, 'desktop')
+  // a strip wide enough that the lens names each part with its size
+  const band = await strip($, 'desktop', 120)
   await clock.settle()
   expect(panes).toEqual([])
 
@@ -1184,4 +1261,18 @@ test('with the pane closed the strip still reads the breakdown as the context gr
   const drawn = JSON.stringify(await band.drawn())
   expect(drawn).toContain('>Skills</tspan><tspan fill-opacity=\\".72\\">  9.7k')
   expect(drawn).not.toContain('18.9k')
+})
+
+test('a slow wheel up from the bottom of the pane lets go of the end', () => {
+  const person = { kind: 'person' } as const
+  const site = { bodyRows: 20, contentRows: 70 }
+  // The page's bottom row a row past the engine's last (50): one tick up lands
+  // on 50, which would keep following the end, so it lands on 49
+  expect(unfollowOffset({ ...site, offset: 50, by: -1, origin: person })).toBe(49)
+  expect(unfollowOffset({ ...site, offset: 49, by: -1, origin: person })).toBe(49)
+  expect(unfollowOffset({ ...site, offset: 30, by: -1, origin: person })).toBe(30)
+  // Down, a plugin's move, and a tree that fits are left alone
+  expect(unfollowOffset({ ...site, offset: 50, by: 1, origin: person })).toBe(50)
+  expect(unfollowOffset({ ...site, offset: 50, by: -1, origin: { kind: 'plugin' } })).toBe(50)
+  expect(unfollowOffset({ bodyRows: 20, contentRows: 15, offset: 0, by: -1, origin: person })).toBe(0)
 })

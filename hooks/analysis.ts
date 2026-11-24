@@ -74,9 +74,14 @@ export const fmt = (n: number): string => {
 }
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
-const tail = (path: string) => path.split('/').filter(Boolean).slice(-2).join('/')
+const tail = (path: string) => path.split(/[\\/]/).filter(Boolean).slice(-2).join('/')
+// C:\Users\me or c:/Users/me: on Windows case and separator do not tell paths apart
+const isWindowsPath = (path: string) => /^[A-Za-z]:[\\/]/.test(path)
+const windowsKey = (path: string) => path.replace(/\\/g, '/').toLowerCase()
+const isInside = (path: string, cwd: string) =>
+  path.startsWith(`${cwd}/`) || (isWindowsPath(cwd) && windowsKey(path).startsWith(`${windowsKey(cwd).replace(/\/+$/, '')}/`))
 // Inside the project a path is shown from its root, so README.md stays README.md
-const short = (path: string, cwd = '') => tail(cwd && path.startsWith(`${cwd}/`) ? path.slice(cwd.length + 1) : path)
+const short = (path: string, cwd = '') => tail(cwd && isInside(path, cwd) ? path.slice(cwd.replace(/[\\/]+$/, '').length + 1) : path)
 const clip = (s: string, n: number) => {
   const flat = s.replace(/\s+/g, ' ').trim()
   return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat
@@ -94,7 +99,8 @@ const SUBCOMMANDS = new Set(['git', 'npm', 'npx', 'pnpm', 'yarn', 'bun', 'bunx',
 const unquote = (w: string) => w.replace(/^(['"])([\s\S]*)\1$/, '$2')
 const isFlag = (w: string) => w.startsWith('-')
 const isRedirect = (w: string) => /^(\d*[<>]|&>)/.test(w)
-const isPath = (w: string) => /[/.]/.test(w) && !/[*?|()\\\s]/.test(w) && !isFlag(w)
+// A backslash is a shell escape, save in a Windows path: C:\repo\file.ts
+const isPath = (w: string) => (/[/.]/.test(w) && !/[*?|()\\\s]/.test(w) && !isFlag(w)) || (isWindowsPath(w) && !/[*?|()\s]/.test(w))
 
 // What a shell command does, in a few words: the cd and env in front dropped,
 // a path made short, a heredoc called a script. Each command of a chain is
@@ -341,7 +347,9 @@ export const GUARD_TTL = 30 * 24 * 60 * 60_000
 
 // Two guards are one when they match the same calls; a Bash guard saved
 // before keys were normalized still matches
-const sameKey = (g: Pick<Guard, 'tool' | 'key'>, tool: string, key: string) => g.tool === tool && (tool === 'Bash' ? bashKey(g.key) === bashKey(key) : g.key === key)
+const samePath = (a: string, b: string) => a === b || (isWindowsPath(a) && isWindowsPath(b) && windowsKey(a) === windowsKey(b))
+const sameKey = (g: Pick<Guard, 'tool' | 'key'>, tool: string, key: string) =>
+  g.tool === tool && (tool === 'Bash' ? bashKey(g.key) === bashKey(key) : samePath(g.key, key))
 export const isGuarded = (gs: readonly Guard[], g: Pick<Guard, 'tool' | 'key'>) => gs.some(x => sameKey(x, g.tool, g.key))
 
 // Whether a guard still stands: not left idle past its lifetime

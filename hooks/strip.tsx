@@ -1,7 +1,7 @@
 import type { Snapshot } from '../types'
 import { fmt } from './analysis'
 import { type Ui, barOf, budgetOf, statusOf } from './pane'
-import { meterBox } from './pane-web'
+import { meterBox, tickOf } from './pane-web'
 
 // The strip above the prompt: one row with the verdict, the fill and the room
 // left, so the context can be watched without the pane taking a column. The
@@ -32,7 +32,7 @@ const cellsOf = (columns: number) => Math.max(16, Math.min(40, Math.round(column
 // The page's meter: the pane's, the whole window with the limit marked, and
 // room above and below the bar for the lens and the readout beside it.
 // The lens is broader and stronger than the pane's: the bar is short
-const METER = { BH: 10, H: 28 } as const
+const METER = { BH: 16, H: 32 } as const
 const LENS = { zoom: 5, tall: 1.8, width: 72 } as const
 // Its width in pixels, from the room the strip has: what the row's words and
 // buttons leave of it, in cells some seven pixels wide at the least
@@ -71,10 +71,11 @@ export const drawStrip = (ui: Ui, d: StripData, actions: StripActions) => {
 
   const meter = () => {
     if (isWeb) {
-      // The verdict and its share, the buttons, the gaps between
-      const W = meterWidth(d.columns, status.text.length + 8 + (canCompact ? 12 : 0) + 18)
+      // The verdict and its share, the scale's figures, the figures, the buttons,
+      // the gaps between
+      const W = meterWidth(d.columns, status.text.length + 8 + 3 + tickOf(snap.window).length + 2 + figures.length + 1 + (canCompact ? 12 : 0) + 18)
       return (
-        <Box flexShrink={0} marginX={1}>
+        <Box flexShrink={0}>
           {meterBox(ui, {
             slot: 'strip',
             snap,
@@ -84,8 +85,6 @@ export const drawStrip = (ui: Ui, d: StripData, actions: StripActions) => {
             ...METER,
             lens: LENS,
             isFull: false,
-            // The page's cells are some eight pixels wide
-            columns: W / 8,
             alt: `${share}% of the ${fmt(snap.window)} window in use, limit at ${fmt(budget)}`,
             turn: { isRunning: d.isRunning, now: d.now },
           })}
@@ -106,9 +105,22 @@ export const drawStrip = (ui: Ui, d: StripData, actions: StripActions) => {
     )
   }
 
-  const figures = room >= 0 ? `${fmt(snap.tokens)} of ${fmt(budget)} · ${fmt(room)} left` : `${fmt(-room)} over ${fmt(budget)}`
+  // On the desktop the scale beside the bar gives the window, so the words
+  // keep what is left and of which limit, the one its pin marks
+  const figures =
+    room >= 0
+      ? isWeb
+        ? `${fmt(room)} left of ${tickOf(budget)}`
+        : `${fmt(snap.tokens)} of ${fmt(budget)} · ${fmt(room)} left`
+      : isWeb
+        ? `${fmt(-room)} over ${tickOf(budget)}`
+        : `${fmt(-room)} over ${fmt(budget)}`
   // A narrow terminal keeps the verdict and the buttons, and drops the rest first
   const isNarrow = !isWeb && d.columns < 70
+  // On the desktop a faint rule parts the verdict, the meter and the room
+  // left, so the meter's figures are not read with the words beside them
+  const rule = (key: string) =>
+    isWeb ? <Box key={key} flexShrink={0} width={0.15} height={1} marginX={1} backgroundColor="#80808059" /> : undefined
 
   return (
     <Box width="100%" justifyContent="space-between" alignItems="center">
@@ -122,7 +134,9 @@ export const drawStrip = (ui: Ui, d: StripData, actions: StripActions) => {
         <Box flexShrink={0} marginLeft={1}>
           <Text bold>{`${share}%`}</Text>
         </Box>
+        {!isNarrow && rule('rule-meter')}
         {!isNarrow && meter()}
+        {!isNarrow && rule('rule-room')}
         {!isNarrow && (
           <Box flexShrink={1} minWidth={0} overflow="hidden">
             <Text dimColor wrap="truncate-end">
