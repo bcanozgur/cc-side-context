@@ -51,7 +51,7 @@ The pane docks beside the transcript, and the strip sits above the prompt.
 
 The strip sits above the prompt, and **Details** opens the pane beside the chat.
 
-<img src="docs/desktop.png" alt="cc-side-context in the Claude desktop app: the strip above the prompt and the pane beside the chat" width="720">
+<img src="docs/desktop.png" alt="The cc-side-context pane in the Claude desktop app: the meter, what is in context, the biggest outputs and the plan limits" width="400">
 
 ### The pane, section by section
 
